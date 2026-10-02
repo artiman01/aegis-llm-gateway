@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 
-try:
+if sys.version_info >= (3, 11):
     from enum import StrEnum
-except ImportError:
+else:
     from enum import Enum
 
-    class StrEnum(str, Enum):  # noqa: UP042
+    class StrEnum(str, Enum):
         """Compatibility fallback for Python < 3.11."""
 
         pass
@@ -193,10 +194,11 @@ class ChatCompletionRequest(BaseModel):
     def compute_cache_key(self) -> str:
         """Compute deterministic SHA-256 hash for L1 exact match cache.
 
-        Incorporates model, serialized messages, temperature, top_p, tools, and
-        the isolating user/tenant_id (or None if shared/public).
+        Incorporates model, serialized messages (including tool_calls), temperature,
+        top_p, max_tokens, stop, seed, presence_penalty, frequency_penalty, logit_bias,
+        tool_choice, tools, response_format, and strictly isolates under a multi-tenant namespace.
         """
-        user_identifier = self.user or self.tenant_id
+        namespace = f"tenant:{self.tenant_id or 'default'}:user:{self.user or 'anonymous'}"
         canonical_dict = {
             "model": self.model,
             "messages": [
@@ -204,6 +206,10 @@ class ChatCompletionRequest(BaseModel):
                     "role": m.role.value,
                     "content": m.get_text_content(),
                     "name": m.name,
+                    "tool_calls": [tc.model_dump() for tc in m.tool_calls]
+                    if m.tool_calls
+                    else None,
+                    "tool_call_id": m.tool_call_id,
                 }
                 for m in self.messages
             ],
@@ -211,15 +217,17 @@ class ChatCompletionRequest(BaseModel):
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
             "stop": self.stop,
-            "user": user_identifier,
-            "response_format": self.response_format.model_dump() if self.response_format else None,
+            "seed": self.seed,
+            "presence_penalty": self.presence_penalty,
+            "frequency_penalty": self.frequency_penalty,
+            "logit_bias": self.logit_bias,
+            "tool_choice": self.tool_choice,
             "tools": [t.model_dump() for t in self.tools] if self.tools else None,
+            "response_format": self.response_format.model_dump() if self.response_format else None,
         }
         encoded = json.dumps(canonical_dict, sort_keys=True).encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
-        if user_identifier:
-            return f"llm:exact:{user_identifier}:{digest}"
-        return f"llm:exact:{digest}"
+        return f"llm:exact:{namespace}:{digest}"
 
     def extract_prompt_text(self) -> str:
         """Extract concatenated prompt text for L2 semantic embedding generation."""

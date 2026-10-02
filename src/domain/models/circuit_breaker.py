@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 import time
 
-try:
+if sys.version_info >= (3, 11):
     from enum import StrEnum
-except ImportError:
+else:
     from enum import Enum
 
-    class StrEnum(str, Enum):  # noqa: UP042
+    class StrEnum(str, Enum):
         """Compatibility fallback for Python < 3.11."""
 
         pass

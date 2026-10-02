@@ -141,3 +141,33 @@ class TestStreamingDFAAutomaton:
         combined = out1 + out2 + flushed
         assert combined == "Привет, вот ключ: [REDACTED]"
         assert "sk-proj" not in combined
+
+    def test_concurrent_streams_no_buffer_contamination(self) -> None:
+        """Simulate 2 concurrent interleaved streams and prove complete state isolation."""
+        # Using factory for request-scoped DFA creation
+        dfa_factory = StreamingDFAAutomaton
+        dfa_stream1 = dfa_factory()
+        dfa_stream2 = dfa_factory()
+
+        # Stream 1 receives partial secret prefix
+        s1_out1 = dfa_stream1.process_chunk("Key is sk-pr")
+        assert dfa_stream1.carry_over != ""
+
+        # Stream 2 receives completely benign data concurrently
+        s2_out1 = dfa_stream2.process_chunk("Normal benign user message without secrets.")
+        assert dfa_stream2.carry_over == ""
+        assert s2_out1 == "Normal benign user message without secrets."
+
+        # Stream 1 completes its sensitive token
+        s1_out2 = dfa_stream1.process_chunk("oj-1234567890secretkey valid.")
+        s1_flushed = dfa_stream1.flush()
+        s1_full = s1_out1 + s1_out2 + s1_flushed
+
+        # Stream 2 completes
+        s2_flushed = dfa_stream2.flush()
+        s2_full = s2_out1 + s2_flushed
+
+        assert "sk-proj-1234567890secretkey" not in s1_full
+        assert s1_full == "Key is [REDACTED] valid."
+        assert s2_full == "Normal benign user message without secrets."
+        assert "[REDACTED]" not in s2_full

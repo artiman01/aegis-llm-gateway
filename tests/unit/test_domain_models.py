@@ -16,8 +16,10 @@ from domain.models.chat import (
     ChoiceMessage,
     ContentPartText,
     DeltaMessage,
+    FunctionCall,
     Role,
     StreamChoice,
+    ToolCall,
     UsageInfo,
 )
 from domain.models.circuit_breaker import (
@@ -89,6 +91,64 @@ class TestChatModels:
             temperature=0.8,
         )
         assert req1.compute_cache_key() != req2.compute_cache_key()
+
+    def test_compute_cache_key_full_completeness_and_composite_namespace(self) -> None:
+        """Cache keys must incorporate seed, penalties, tool_calls, and composite namespace."""
+        req_base = ChatCompletionRequest(
+            model="gpt-4o",
+            messages=[ChatMessage(role=Role.USER, content="Hello")],
+            tenant_id="tenant-alpha",
+            user="user-123",
+        )
+        key_base = req_base.compute_cache_key()
+        assert "tenant:tenant-alpha:user:user-123" in key_base
+
+        # Default namespace fallback
+        req_default = ChatCompletionRequest(
+            model="gpt-4o",
+            messages=[ChatMessage(role=Role.USER, content="Hello")],
+        )
+        assert "tenant:default:user:anonymous" in req_default.compute_cache_key()
+
+        # Seed differs
+        req_seed = req_base.model_copy(update={"seed": 42})
+        assert req_seed.compute_cache_key() != key_base
+
+        # Presence penalty differs
+        req_pp = req_base.model_copy(update={"presence_penalty": 0.5})
+        assert req_pp.compute_cache_key() != key_base
+
+        # Frequency penalty differs
+        req_fp = req_base.model_copy(update={"frequency_penalty": 0.5})
+        assert req_fp.compute_cache_key() != key_base
+
+        # Logit bias differs
+        req_lb = req_base.model_copy(update={"logit_bias": {"123": -1.0}})
+        assert req_lb.compute_cache_key() != key_base
+
+        # Tool choice differs
+        req_tc = req_base.model_copy(update={"tool_choice": "auto"})
+        assert req_tc.compute_cache_key() != key_base
+
+        # Tool calls in message history differ
+        tool_call = ToolCall(
+            id="call_1",
+            function=FunctionCall(name="get_weather", arguments='{"loc": "Paris"}'),
+        )
+        req_with_tool_call = ChatCompletionRequest(
+            model="gpt-4o",
+            messages=[
+                ChatMessage(role=Role.USER, content="Hello"),
+                ChatMessage(
+                    role=Role.ASSISTANT,
+                    content=None,
+                    tool_calls=[tool_call],
+                ),
+            ],
+            tenant_id="tenant-alpha",
+            user="user-123",
+        )
+        assert req_with_tool_call.compute_cache_key() != key_base
 
     def test_extract_prompt_text_multimodal(self) -> None:
         """Extract prompt text converts multipart messages into concatenated text."""

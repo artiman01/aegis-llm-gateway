@@ -37,6 +37,50 @@ class _ProviderCircuitState:
     last_error: str | None = None
 
 
+class CircuitBreakerLease:
+    """Execution token representing granted permission to call an upstream provider.
+
+    Ensures safe, asynchronous reporting of call outcomes (success, failure, or cancellation).
+    """
+
+    def __init__(
+        self,
+        service: CircuitBreakerService,
+        provider_name: str,
+        config: CircuitBreakerConfig | None = None,
+    ) -> None:
+        self._service = service
+        self._provider_name = provider_name
+        self._config = config
+        self._completed = False
+
+    @property
+    def provider_name(self) -> str:
+        """Name of provider associated with this lease."""
+        return self._provider_name
+
+    async def record_success(self) -> None:
+        """Record success, transitioning HALF_OPEN -> CLOSED if threshold reached."""
+        if self._completed:
+            return
+        self._completed = True
+        await self._service.record_success(self._provider_name, self._config)
+
+    async def record_failure(self, exc: Exception | str) -> None:
+        """Record failure, transitioning CLOSED -> OPEN if threshold reached."""
+        if self._completed:
+            return
+        self._completed = True
+        await self._service.record_failure(self._provider_name, exc, self._config)
+
+    async def record_cancelled(self) -> None:
+        """Safely decrement in_flight_probes in HALF_OPEN without incrementing failure counter."""
+        if self._completed:
+            return
+        self._completed = True
+        await self._service.record_cancelled(self._provider_name, self._config)
+
+
 class CircuitBreakerService:
     """Orchestrates Circuit Breaker state machines across all LLM providers."""
 
@@ -116,6 +160,31 @@ class CircuitBreakerService:
 
             # CLOSED state: traffic allowed unconditionally
 
+    async def acquire_lease(
+        self,
+        provider_name: str,
+        config: CircuitBreakerConfig | None = None,
+    ) -> CircuitBreakerLease:
+        """Acquire an execution lease for a provider, validating circuit availability.
+
+        Raises:
+            CircuitBreakerOpenError: If the circuit is OPEN or probe capacity in HALF_OPEN is full.
+        """
+        await self.acquire_execution_permission(provider_name, config)
+        return CircuitBreakerLease(self, provider_name, config)
+
+    async def record_cancelled(
+        self,
+        provider_name: str,
+        config: CircuitBreakerConfig | None = None,
+    ) -> None:
+        """Safely release an in-flight probe if a task was cancelled without failing."""
+        lock = await self._get_lock(provider_name)
+        async with lock:
+            circuit = self._get_or_create_state(provider_name)
+            if circuit.state == CircuitBreakerState.HALF_OPEN:
+                circuit.in_flight_probes = max(0, circuit.in_flight_probes - 1)
+
     async def record_success(
         self,
         provider_name: str,
@@ -163,7 +232,14 @@ class CircuitBreakerService:
             circuit.total_failures += 1
             circuit.consecutive_failures += 1
             circuit.last_failure_time = now
-            circuit.last_error = str(error)
+
+            # Sanitize last_error: remove tracebacks and raw payload leaks
+            err_str = str(error)
+            if "\n" in err_str:
+                err_str = err_str.split("\n", maxsplit=1)[0]
+            if len(err_str) > 200:
+                err_str = err_str[:200] + "..."
+            circuit.last_error = err_str
 
             if circuit.state == CircuitBreakerState.HALF_OPEN:
                 # Any failure during HALF_OPEN immediately trips back to OPEN

@@ -1,18 +1,16 @@
-"""OpenAI-compatible /v1/chat/completions endpoint, /health, and /metrics."""
+"""OpenAI-compatible /v1/chat/completions and /v1/models endpoints."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, Request, status
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import Response, StreamingResponse
 
-from application.services.circuit_breaker_service import CircuitBreakerService
 from application.use_cases.route_chat_completion_use_case import (
     RouteChatCompletionUseCase,
 )
@@ -22,9 +20,6 @@ from application.use_cases.stream_chat_completion_use_case import (
 from domain.models.chat import (
     ChatCompletionChunk,
     ChatCompletionRequest,
-)
-from infrastructure.observability.prometheus_metrics_adapter import (
-    PrometheusMetricsAdapter,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,16 +35,6 @@ def get_route_use_case(request: Request) -> RouteChatCompletionUseCase:
 def get_stream_use_case(request: Request) -> StreamChatCompletionUseCase:
     """Dependency retrieving StreamChatCompletionUseCase from application state."""
     return request.app.state.stream_use_case  # type: ignore[no-any-return]
-
-
-def get_metrics_adapter(request: Request) -> PrometheusMetricsAdapter:
-    """Dependency retrieving PrometheusMetricsAdapter from application state."""
-    return request.app.state.metrics_adapter  # type: ignore[no-any-return]
-
-
-def get_circuit_breaker_service(request: Request) -> CircuitBreakerService:
-    """Dependency retrieving CircuitBreakerService from application state."""
-    return request.app.state.circuit_breaker  # type: ignore[no-any-return]
 
 
 @router.post(
@@ -75,6 +60,10 @@ async def create_chat_completion(
         bypass_cache = True
     if x_aegis_no_cache and x_aegis_no_cache.lower() in ("true", "1"):
         bypass_cache = True
+
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if tenant_id and not chat_request.tenant_id:
+        chat_request = chat_request.model_copy(update={"tenant_id": tenant_id})
 
     if not chat_request.stream:
         comp_response = await route_use_case.execute(chat_request, bypass_cache=bypass_cache)
@@ -166,42 +155,3 @@ async def list_models(request: Request) -> dict[str, Any]:
         for m in registered_models
     ]
     return {"object": "list", "data": data}
-
-
-@router.get(
-    "/health",
-    status_code=status.HTTP_200_OK,
-    summary="Health and readiness probe",
-    description="Returns gateway status, provider circuit breaker states, and uptime.",
-)
-async def health_check(
-    circuit_breaker: CircuitBreakerService = Depends(get_circuit_breaker_service),
-    request: Request = None,  # type: ignore[assignment]
-) -> dict[str, Any]:
-    """Liveness and readiness health check."""
-    providers: list[str] = list(getattr(request.app.state, "registered_providers", []))
-    cb_snapshots = {}
-    for p in providers:
-        snapshot = await circuit_breaker.get_snapshot(p)
-        cb_snapshots[p] = snapshot.model_dump()
-
-    return {
-        "status": "healthy",
-        "timestamp": time.time(),
-        "gateway": "AegisLLM",
-        "demo_mode": getattr(request.app.state, "demo_mode", False),
-        "providers": cb_snapshots,
-    }
-
-
-@router.get(
-    "/metrics",
-    summary="Prometheus metrics scrape target",
-    description="Exposes Prometheus metrics for scraping.",
-)
-async def metrics_endpoint(
-    metrics: PrometheusMetricsAdapter = Depends(get_metrics_adapter),
-) -> Response:
-    """Prometheus metrics exposition endpoint."""
-    raw_data, content_type = metrics.export_metrics()
-    return Response(content=raw_data, media_type=content_type)

@@ -40,6 +40,8 @@ from infrastructure.providers.mock_provider import MockProvider
 from infrastructure.providers.openai_adapter import OpenAIAdapter
 from infrastructure.security.streaming_dfa_automaton import StreamingDFAAutomaton
 from presentation.api.v1.endpoints.chat import router as chat_router
+from presentation.api.v1.endpoints.system import router as system_router
+from presentation.middlewares.auth_middleware import AuthMiddleware
 from presentation.middlewares.error_handling_middleware import ErrorHandlingMiddleware
 from presentation.middlewares.logging_middleware import LoggingMiddleware
 from presentation.middlewares.security_headers_middleware import (
@@ -201,7 +203,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         routing_rules=routing_rules,
         circuit_breaker=circuit_breaker,
         hedged_dispatcher=hedged_dispatcher,
-        streaming_dfa=streaming_dfa,
+        dfa_factory=StreamingDFAAutomaton,
         metrics=metrics_adapter,
         default_provider=next(iter(providers)),
     )
@@ -269,8 +271,10 @@ Production-grade, resilient, observable LLM Gateway built with Hexagonal Archite
     app.add_middleware(ErrorHandlingMiddleware)
     app.add_middleware(TimingMiddleware)
     app.add_middleware(LoggingMiddleware)
+    app.add_middleware(AuthMiddleware)
 
     # Register Routers
+    app.include_router(system_router)
     app.include_router(chat_router)
 
     return app

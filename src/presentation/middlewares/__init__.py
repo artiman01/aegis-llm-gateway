@@ -1,5 +1,4 @@
-"""Presentation middlewares export."""
-
+from presentation.middlewares.auth_middleware import AuthMiddleware
 from presentation.middlewares.error_handling_middleware import (
     ErrorHandlingMiddleware,
     format_openai_error_response,
@@ -11,6 +10,7 @@ from presentation.middlewares.security_headers_middleware import (
 from presentation.middlewares.timing_middleware import TimingMiddleware
 
 __all__ = [
+    "AuthMiddleware",
     "ErrorHandlingMiddleware",
     "LoggingMiddleware",
     "SecurityHeadersMiddleware",

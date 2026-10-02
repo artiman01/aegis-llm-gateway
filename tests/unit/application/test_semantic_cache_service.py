@@ -11,7 +11,11 @@ from domain.models.chat import (
     ChatMessage,
     Choice,
     ChoiceMessage,
+    FunctionCall,
+    FunctionDefinition,
     Role,
+    ToolCall,
+    ToolDefinition,
 )
 
 
@@ -267,3 +271,74 @@ async def test_tenant_user_isolation_l1_and_l2(
     # 5. Public query misses cache (no leakage to unauthenticated queries)
     miss_public = await cache_svc.get(req_public)
     assert miss_public is None
+
+
+@pytest.mark.asyncio
+async def test_cache_eligibility_bypasses_l2_on_temperature_and_tools(
+    sample_response: ChatCompletionResponse,
+) -> None:
+    """L2 semantic cache is strictly bypassed when temperature > 0.0 or tools are present."""
+    l1 = InMemoryL1CacheMock()
+    l2 = InMemoryL2CacheMock()
+    emb = DummyEmbeddingPort()
+    cache_svc = SemanticCacheService(
+        l1_cache=l1,
+        l2_cache=l2,
+        embedding=emb,
+        similarity_threshold=0.90,
+    )
+
+    # 1. Deterministic request (temperature=0.0): eligible
+    req_det = ChatCompletionRequest(
+        model="gpt-4o",
+        messages=[ChatMessage(role=Role.USER, content="Deterministic query")],
+        temperature=0.0,
+    )
+    assert cache_svc.is_cache_eligible(req_det) is True
+
+    # 2. Non-deterministic request (temperature=0.7): ineligible
+    req_nondet = ChatCompletionRequest(
+        model="gpt-4o",
+        messages=[ChatMessage(role=Role.USER, content="Non-deterministic query")],
+        temperature=0.7,
+    )
+    assert cache_svc.is_cache_eligible(req_nondet) is False
+
+    # Store non-deterministic request: L2 store should be skipped
+    await cache_svc.set(req_nondet, sample_response)
+    assert len(l2.entries) == 0  # L2 store was skipped!
+
+    # 3. Request with tools: ineligible
+    req_tools = ChatCompletionRequest(
+        model="gpt-4o",
+        messages=[ChatMessage(role=Role.USER, content="Tool query")],
+        temperature=0.0,
+        tools=[
+            ToolDefinition(
+                type="function",
+                function=FunctionDefinition(name="calc"),
+            )
+        ],
+    )
+    assert cache_svc.is_cache_eligible(req_tools) is False
+    await cache_svc.set(req_tools, sample_response)
+    assert len(l2.entries) == 0
+
+    # 4. Request with tool_calls in message: ineligible
+    req_tool_msg = ChatCompletionRequest(
+        model="gpt-4o",
+        messages=[
+            ChatMessage(
+                role=Role.ASSISTANT,
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_x",
+                        function=FunctionCall(name="calc", arguments="{}"),
+                    )
+                ],
+            )
+        ],
+        temperature=0.0,
+    )
+    assert cache_svc.is_cache_eligible(req_tool_msg) is False

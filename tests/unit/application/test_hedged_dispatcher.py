@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from application.services.circuit_breaker_service import CircuitBreakerService
 from application.services.hedged_dispatcher_service import HedgedDispatcherService
 from domain.models.chat import (
     ChatCompletionChunk,
@@ -17,6 +18,7 @@ from domain.models.chat import (
     Role,
     StreamChoice,
 )
+from domain.models.circuit_breaker import CircuitBreakerState
 
 
 @pytest.fixture
@@ -217,3 +219,51 @@ async def test_hedged_dispatcher_finops_guard_bypasses_hedging() -> None:
     assert resp.id == "chatcmpl-primary-only"
     assert winner == "openai"
     assert fallback_called is False
+
+
+@pytest.mark.asyncio
+async def test_primary_failures_in_hedging_races_trips_circuit_breaker_to_open() -> None:
+    """Primary fails 5 consecutive times during hedging races -> Circuit Breaker trips to OPEN."""
+    cb = CircuitBreakerService()
+    dispatcher = HedgedDispatcherService(
+        circuit_breaker=cb,
+        min_delay_seconds=0.01,
+        safety_margin_seconds=0.005,
+        default_p90_seconds=0.02,
+    )
+
+    async def failing_primary() -> ChatCompletionResponse:
+        await asyncio.sleep(0.01)
+        raise RuntimeError("Primary upstream connection failure")
+
+    async def successful_fallback() -> ChatCompletionResponse:
+        await asyncio.sleep(0.03)
+        return ChatCompletionResponse(
+            id="chatcmpl-fb-win",
+            model="gpt-4o",
+            choices=[
+                Choice(
+                    index=0,
+                    message=ChoiceMessage(role=Role.ASSISTANT, content="Recovered by fallback"),
+                )
+            ],
+        )
+
+    # Run 5 hedging cycles where primary fails and fallback recovers
+    for _ in range(5):
+        resp, winner = await dispatcher.execute_hedged_completion(
+            primary_call=failing_primary,
+            fallback_call=successful_fallback,
+            primary_name="openai",
+            fallback_name="anthropic",
+        )
+        assert winner == "anthropic"
+        assert resp.id == "chatcmpl-fb-win"
+
+    # Circuit breaker for Primary must now be OPEN
+    primary_state = await cb.get_state("openai")
+    assert primary_state == CircuitBreakerState.OPEN
+
+    # Fallback circuit breaker must remain CLOSED
+    fallback_state = await cb.get_state("anthropic")
+    assert fallback_state == CircuitBreakerState.CLOSED

@@ -195,3 +195,36 @@ async def test_reset_circuit_breaker() -> None:
     snapshot_reset = await cb.get_snapshot("openai")
     assert snapshot_reset.state == CircuitBreakerState.CLOSED
     assert snapshot_reset.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_lease_lifecycle(test_config: CircuitBreakerConfig) -> None:
+    """CircuitBreakerLease records success, failure, and safe probe cancellation."""
+    cb = CircuitBreakerService(default_config=test_config)
+
+    # 1. Acquire lease and record success
+    lease1 = await cb.acquire_lease("openai")
+    assert lease1.provider_name == "openai"
+    await lease1.record_success()
+    # Idempotent: repeated calls do nothing
+    await lease1.record_success()
+
+    # 2. Trip to OPEN using failures via lease
+    for _ in range(3):
+        lease = await cb.acquire_lease("openai")
+        await lease.record_failure(RuntimeError("error"))
+    assert await cb.get_state("openai") == CircuitBreakerState.OPEN
+
+    # 3. Wait for recovery timeout to enter HALF_OPEN
+    await asyncio.sleep(0.12)
+    lease_half = await cb.acquire_lease("openai")
+    assert await cb.get_state("openai") == CircuitBreakerState.HALF_OPEN
+
+    # 4. Cancel lease: should decrement in_flight_probes without tripping to OPEN
+    await lease_half.record_cancelled()
+    snapshot = await cb.get_snapshot("openai")
+    assert snapshot.state == CircuitBreakerState.HALF_OPEN
+
+    # Since in_flight_probes was decremented, another probe can be acquired
+    lease_probe = await cb.acquire_lease("openai")
+    await lease_probe.record_success()

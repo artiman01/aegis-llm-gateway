@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING
 
 from domain.exceptions import CircuitBreakerOpenError, NoAvailableProviderError
@@ -15,6 +15,7 @@ from domain.models.chat import (
     DeltaMessage,
     StreamChoice,
 )
+from infrastructure.security.streaming_dfa_automaton import StreamingDFAAutomaton
 
 if TYPE_CHECKING:
     from application.services.circuit_breaker_service import CircuitBreakerService
@@ -22,7 +23,6 @@ if TYPE_CHECKING:
     from domain.models.provider import ProviderConfig, RoutingRule
     from domain.ports.metrics_port import MetricsPort
     from domain.ports.provider_port import LLMProviderPort
-    from infrastructure.security.streaming_dfa_automaton import StreamingDFAAutomaton
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,8 @@ class StreamChatCompletionUseCase:
         circuit_breaker: CircuitBreakerService,
         *,
         hedged_dispatcher: HedgedDispatcherService | None = None,
-        streaming_dfa: StreamingDFAAutomaton | None = None,
+        dfa_factory: Callable[[], StreamingDFAAutomaton] | None = None,
+        streaming_dfa: StreamingDFAAutomaton | Callable[[], StreamingDFAAutomaton] | None = None,
         metrics: MetricsPort | None = None,
         default_provider: str = "openai",
     ) -> None:
@@ -52,27 +53,53 @@ class StreamChatCompletionUseCase:
         self._rules = routing_rules
         self._circuit_breaker = circuit_breaker
         self._hedged_dispatcher = hedged_dispatcher
-        self._streaming_dfa = streaming_dfa
         self._metrics = metrics
         self._default_provider = default_provider
 
-    def _sanitize_chunk(self, chunk: ChatCompletionChunk) -> ChatCompletionChunk:
+        if dfa_factory is not None:
+            self._dfa_factory: Callable[[], StreamingDFAAutomaton] | None = dfa_factory
+        elif callable(streaming_dfa):
+            self._dfa_factory = streaming_dfa
+        elif streaming_dfa is not None:
+            patterns = getattr(streaming_dfa, "_patterns", None)
+            prefix_patterns = getattr(streaming_dfa, "_prefix_patterns", None)
+            replacement = getattr(streaming_dfa, "_replacement", "[REDACTED]")
+            max_carry_over = getattr(streaming_dfa, "_max_carry_over", 128)
+            self._dfa_factory = lambda: StreamingDFAAutomaton(
+                patterns=patterns,
+                prefix_patterns=prefix_patterns,
+                replacement=replacement,
+                max_carry_over=max_carry_over,
+            )
+        else:
+            self._dfa_factory = None
+
+    @staticmethod
+    def _sanitize_chunk(
+        chunk: ChatCompletionChunk,
+        dfa: StreamingDFAAutomaton | None,
+    ) -> ChatCompletionChunk:
         """Apply DFA token boundary masking to chunk delta content."""
-        if self._streaming_dfa is None or not chunk.choices:
+        if dfa is None or not chunk.choices:
             return chunk
         choice = chunk.choices[0]
         if choice.delta.content:
-            sanitized = self._streaming_dfa.process_chunk(choice.delta.content)
+            sanitized = dfa.process_chunk(choice.delta.content)
             new_delta = choice.delta.model_copy(update={"content": sanitized})
             new_choice = choice.model_copy(update={"delta": new_delta})
             return chunk.model_copy(update={"choices": [new_choice]})
         return chunk
 
-    def _flush_dfa_chunk(self, chunk_id: str, model: str) -> ChatCompletionChunk | None:
+    @staticmethod
+    def _flush_dfa_chunk(
+        chunk_id: str,
+        model: str,
+        dfa: StreamingDFAAutomaton | None,
+    ) -> ChatCompletionChunk | None:
         """Flush any remaining carry-over text from the DFA automaton."""
-        if self._streaming_dfa is None:
+        if dfa is None:
             return None
-        remaining = self._streaming_dfa.flush()
+        remaining = dfa.flush()
         if not remaining:
             return None
         return ChatCompletionChunk(
@@ -96,6 +123,8 @@ class StreamChatCompletionUseCase:
             NoAvailableProviderError: If all candidate providers fail prior to emitting
                 the first chunk.
         """
+        dfa = self._dfa_factory() if self._dfa_factory is not None else None
+
         rule = self._rules.get(request.model)
         if rule is not None:
             candidates = [rule.primary_provider, *rule.fallback_providers]
@@ -151,9 +180,9 @@ class StreamChatCompletionUseCase:
                             self._metrics.record_stream_chunk(
                                 provider=winner_name, model=request.model
                             )
-                        yield self._sanitize_chunk(chunk)
+                        yield self._sanitize_chunk(chunk, dfa)
 
-                    flush_chunk = self._flush_dfa_chunk(last_id, request.model)
+                    flush_chunk = self._flush_dfa_chunk(last_id, request.model, dfa)
                     if flush_chunk is not None:
                         yield flush_chunk
                     return
@@ -240,7 +269,7 @@ class StreamChatCompletionUseCase:
                 self._metrics.record_stream_chunk(provider=provider_name, model=request.model)
 
             # Emit the first chunk (sanitized)
-            yield self._sanitize_chunk(first_chunk)
+            yield self._sanitize_chunk(first_chunk, dfa)
 
             # Stream remaining chunks with graceful degradation
             try:
@@ -250,9 +279,9 @@ class StreamChatCompletionUseCase:
                             self._metrics.record_stream_chunk(
                                 provider=provider_name, model=request.model
                             )
-                        yield self._sanitize_chunk(chunk)
+                        yield self._sanitize_chunk(chunk, dfa)
 
-                flush_chunk = self._flush_dfa_chunk(first_chunk.id, request.model)
+                flush_chunk = self._flush_dfa_chunk(first_chunk.id, request.model, dfa)
                 if flush_chunk is not None:
                     yield flush_chunk
 

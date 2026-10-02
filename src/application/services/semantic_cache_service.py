@@ -40,6 +40,25 @@ class SemanticCacheService:
         self._l1_ttl_seconds = l1_ttl_seconds
         self._l2_ttl_seconds = l2_ttl_seconds
 
+    def is_cache_eligible(self, request: ChatCompletionRequest) -> bool:
+        """Evaluate whether a request is eligible for semantic L2 cache lookups and storage.
+
+        Semantic L2 caching is bypassed when:
+        1. Temperature is non-zero (request.temperature > 0.0) indicating non-deterministic output.
+        2. Tools or functions are configured in the request definition or conversation history.
+        """
+        if request.temperature is not None and request.temperature > 0.0:
+            return False
+
+        if request.tools or request.tool_choice:
+            return False
+
+        for msg in request.messages:
+            if msg.tool_calls or msg.role.value in ("tool", "function"):
+                return False
+
+        return True
+
     async def get(
         self,
         request: ChatCompletionRequest,
@@ -69,7 +88,11 @@ class SemanticCacheService:
                 logger.warning("L1 cache retrieval failed (fail-open): %s", e)
 
         # Tier 2: Semantic Similarity Match (~5-15ms)
-        if self._l2_cache is not None and self._embedding is not None:
+        if (
+            self._l2_cache is not None
+            and self._embedding is not None
+            and self.is_cache_eligible(request)
+        ):
             try:
                 prompt_text = request.extract_prompt_text()
                 if prompt_text:
@@ -141,7 +164,11 @@ class SemanticCacheService:
                 logger.warning("L1 cache write failed: %s", e)
 
         # Populate L2 Semantic Cache
-        if self._l2_cache is not None and self._embedding is not None:
+        if (
+            self._l2_cache is not None
+            and self._embedding is not None
+            and self.is_cache_eligible(request)
+        ):
             try:
                 prompt_text = request.extract_prompt_text()
                 if prompt_text:

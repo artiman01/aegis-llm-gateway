@@ -115,3 +115,13 @@ class TestWhiteningTransformer:
         whitened = transformer.whiten([1.5, 1.5, 1.5, 1.5])
         assert len(whitened) == dim
         assert pytest.approx(float(np.linalg.norm(whitened)), abs=1e-5) == 1.0
+
+    def test_dimension_384_baseline_calibration_is_fitted_out_of_box(self) -> None:
+        """Dimension 384 transformer initializes with synthetic baseline fitted out-of-the-box."""
+        transformer = WhiteningTransformer(dimension=384)
+        assert transformer.is_fitted is True
+
+        sample_vec = [0.1] * 384
+        whitened = transformer.whiten(sample_vec)
+        assert len(whitened) == 384
+        assert pytest.approx(float(np.linalg.norm(whitened)), abs=1e-5) == 1.0

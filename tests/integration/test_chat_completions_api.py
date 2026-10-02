@@ -23,7 +23,11 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
     with patch(target, mock_embed_batch):
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://test",
+                headers={"Authorization": "Bearer sk-aegis-master-key"},
+            ) as ac:
                 yield ac
 
 
@@ -182,3 +186,91 @@ async def test_api_streaming_client_disconnect(
 
     # Disconnect prevented emitting full [DONE] terminating sequence
     assert "data: [DONE]" not in chunks
+
+
+@pytest.mark.asyncio
+async def test_api_auth_missing_header_returns_401(client: httpx.AsyncClient) -> None:
+    """Missing Authorization header on protected endpoints must return HTTP 401."""
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "Unauthenticated hello"}],
+    }
+    # Explicitly clear authorization header
+    response = await client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers={"Authorization": ""},
+    )
+    assert response.status_code == 401
+    data = response.json()
+    assert "error" in data
+    assert data["error"]["type"] == "authentication_error"
+
+
+@pytest.mark.asyncio
+async def test_api_auth_invalid_key_returns_401(client: httpx.AsyncClient) -> None:
+    """Invalid Bearer token must return HTTP 401."""
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "Unauthorized hello"}],
+    }
+    response = await client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers={"Authorization": "Bearer sk-invalid-hacker-key"},
+    )
+    assert response.status_code == 401
+    data = response.json()
+    assert data["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_api_auth_tenant_header_extracted(client: httpx.AsyncClient) -> None:
+    """Requests with X-Tenant-ID header properly isolate tenant cache."""
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "Tenant isolated prompt"}],
+        "temperature": 0.0,
+    }
+    response = await client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers={
+            "Authorization": "Bearer sk-aegis-master-key",
+            "X-Tenant-ID": "tenant-corp-acme",
+        },
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_api_health_live_endpoint(client: httpx.AsyncClient) -> None:
+    """GET /health/live returns always 200 alive without requiring auth."""
+    # Test without Authorization header
+    response = await client.get("/health/live", headers={"Authorization": ""})
+    assert response.status_code == 200
+    assert response.json() == {"status": "alive"}
+
+
+@pytest.mark.asyncio
+async def test_api_health_ready_endpoint(client: httpx.AsyncClient) -> None:
+    """GET /health/ready returns 200 when providers are healthy."""
+    response = await client.get("/health/ready", headers={"Authorization": ""})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ready"
+    assert "available_providers" in data
+
+
+@pytest.mark.asyncio
+async def test_api_health_sanitized_output(client: httpx.AsyncClient) -> None:
+    """GET /health provides sanitized status without raw_response or tracebacks."""
+    response = await client.get("/health", headers={"Authorization": ""})
+    assert response.status_code == 200
+    data = response.json()
+    assert "status" in data
+    assert "providers" in data
+    for _prov_name, prov_info in data["providers"].items():
+        assert "raw_response" not in prov_info
+        if prov_info.get("last_error"):
+            assert "Traceback" not in prov_info["last_error"]

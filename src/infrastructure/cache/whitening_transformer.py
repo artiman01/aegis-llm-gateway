@@ -18,12 +18,19 @@ class WhiteningTransformer(WhiteningPort):
     by centering and diagonalizing the covariance matrix (Zero-phase Component Analysis).
     """
 
-    def __init__(self, dimension: int = 384, epsilon: float = 1e-5) -> None:
+    def __init__(
+        self,
+        dimension: int = 384,
+        epsilon: float = 1e-5,
+        init_baseline: bool | None = None,
+    ) -> None:
         """Initialize WhiteningTransformer.
 
         Args:
             dimension: Dimensionality of input embeddings (default 384 for all-MiniLM-L6-v2).
             epsilon: Regularization parameter added to eigenvalues for numerical stability.
+            init_baseline: Whether to initialize with baseline calibration. If None,
+                defaults to True when dimension == 384 (production baseline).
         """
         if epsilon <= 0.0:
             raise ValueError(
@@ -33,6 +40,25 @@ class WhiteningTransformer(WhiteningPort):
         self._epsilon = epsilon
         self._mean: np.ndarray | None = None
         self._transform_matrix: np.ndarray | None = None
+
+        should_init = init_baseline if init_baseline is not None else (dimension == 384)
+        if should_init:
+            self._init_baseline_calibration()
+
+    def _init_baseline_calibration(self) -> None:
+        """Initialize built-in synthetic/orthogonal reference baseline calibration matrix.
+
+        Enables immediate out-of-the-box ZCA-whitening in production without waiting
+        for cold-start calibration samples.
+        """
+        rng = np.random.RandomState(42)
+        # Deterministic synthetic reference baseline
+        synthetic_samples = rng.standard_normal((128, self._dim)).tolist()
+        self.fit(synthetic_samples)
+        logger.info(
+            "WhiteningTransformer initialized with default baseline calibration (dim=%d)",
+            self._dim,
+        )
 
     @property
     def is_fitted(self) -> bool:

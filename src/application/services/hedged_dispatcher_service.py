@@ -10,6 +10,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from application.services.circuit_breaker_service import (
+        CircuitBreakerLease,
+        CircuitBreakerService,
+    )
     from domain.models.chat import ChatCompletionChunk, ChatCompletionResponse
     from domain.ports.metrics_port import MetricsPort
 
@@ -50,6 +54,7 @@ class HedgedDispatcherService:
         self,
         metrics: MetricsPort | None = None,
         *,
+        circuit_breaker: CircuitBreakerService | None = None,
         min_delay_seconds: float = 0.05,
         safety_margin_seconds: float = 0.05,
         default_p90_seconds: float = 0.35,
@@ -60,6 +65,7 @@ class HedgedDispatcherService:
 
         Args:
             metrics: Optional metrics port for telemetry.
+            circuit_breaker: Optional CircuitBreakerService for automated lease tracking.
             min_delay_seconds: Floor threshold for speculative hedging delay.
             safety_margin_seconds: Safety delta added to P90 latency before triggering fallback.
             default_p90_seconds: Cold-start baseline P90 prior to collecting sufficient samples.
@@ -67,6 +73,7 @@ class HedgedDispatcherService:
             max_hedging_prompt_tokens: Upper token limit beyond which hedging is disabled (FinOps).
         """
         self._metrics = metrics
+        self._circuit_breaker = circuit_breaker
         self._min_delay = min_delay_seconds
         self._safety_margin = safety_margin_seconds
         self._default_p90 = default_p90_seconds
@@ -109,6 +116,9 @@ class HedgedDispatcherService:
         primary_name: str,
         fallback_name: str | None = None,
         prompt_tokens: int = 0,
+        *,
+        primary_lease: CircuitBreakerLease | None = None,
+        fallback_lease: CircuitBreakerLease | None = None,
     ) -> tuple[ChatCompletionResponse, str]:
         """Execute non-streaming completion with speculative hedging against P90 tail latency.
 
@@ -118,11 +128,30 @@ class HedgedDispatcherService:
             primary_name: Name identifier of the primary provider.
             fallback_name: Name identifier of the fallback provider.
             prompt_tokens: Estimated or actual prompt tokens used for FinOps budget gating.
+            primary_lease: Optional pre-acquired execution lease for the primary provider.
+            fallback_lease: Optional pre-acquired execution lease for the fallback provider.
 
         Returns:
             Tuple of (winning_response, winning_provider_name).
         """
         start_time = time.monotonic()
+
+        # Automatically acquire leases if not passed but circuit breaker is available
+        if primary_lease is None and self._circuit_breaker is not None:
+            try:
+                primary_lease = await self._circuit_breaker.acquire_lease(primary_name)
+            except Exception:
+                primary_lease = None
+
+        if (
+            fallback_lease is None
+            and fallback_name is not None
+            and self._circuit_breaker is not None
+        ):
+            try:
+                fallback_lease = await self._circuit_breaker.acquire_lease(fallback_name)
+            except Exception:
+                fallback_lease = None
 
         # FinOps budget guard: heavy context prompts bypass hedging to save costs
         if prompt_tokens > self._max_hedging_prompt_tokens:
@@ -133,10 +162,17 @@ class HedgedDispatcherService:
                 self._max_hedging_prompt_tokens,
                 primary_name,
             )
-            res = await primary_call()
-            elapsed = time.monotonic() - start_time
-            await self.record_latency(primary_name, elapsed)
-            return res, primary_name
+            try:
+                res = await primary_call()
+                if primary_lease is not None:
+                    await primary_lease.record_success()
+                elapsed = time.monotonic() - start_time
+                await self.record_latency(primary_name, elapsed)
+                return res, primary_name
+            except Exception as exc:
+                if primary_lease is not None:
+                    await primary_lease.record_failure(exc)
+                raise
 
         async def _invoke(
             call: Callable[[], Awaitable[ChatCompletionResponse]],
@@ -151,10 +187,14 @@ class HedgedDispatcherService:
             # No fallback available for hedging
             try:
                 response = await task_primary
+                if primary_lease is not None:
+                    await primary_lease.record_success()
                 duration = time.monotonic() - start_time
                 await self.record_latency(primary_name, duration)
                 return response, primary_name
-            except Exception:
+            except Exception as exc:
+                if primary_lease is not None:
+                    await primary_lease.record_failure(exc)
                 raise
 
         hedging_delay = await self.get_hedging_delay(primary_name)
@@ -165,10 +205,14 @@ class HedgedDispatcherService:
         if task_primary in done:
             try:
                 response = task_primary.result()
+                if primary_lease is not None:
+                    await primary_lease.record_success()
                 duration = time.monotonic() - start_time
                 await self.record_latency(primary_name, duration)
                 return response, primary_name
             except Exception as exc:
+                if primary_lease is not None:
+                    await primary_lease.record_failure(exc)
                 logger.warning(
                     "Primary provider '%s' failed before hedging delay (%s); falling back",
                     primary_name,
@@ -176,9 +220,16 @@ class HedgedDispatcherService:
                 )
                 # Primary failed fast: proceed immediately to fallback
                 fallback_start = time.monotonic()
-                fb_resp = await fallback_call()
-                await self.record_latency(fallback_name, time.monotonic() - fallback_start)
-                return fb_resp, fallback_name
+                try:
+                    fb_resp = await fallback_call()
+                    if fallback_lease is not None:
+                        await fallback_lease.record_success()
+                    await self.record_latency(fallback_name, time.monotonic() - fallback_start)
+                    return fb_resp, fallback_name
+                except Exception as fb_exc:
+                    if fallback_lease is not None:
+                        await fallback_lease.record_failure(fb_exc)
+                    raise
 
         # Hedging delay expired: primary is in the slow tail! Launch speculative fallback.
         logger.info(
@@ -198,7 +249,18 @@ class HedgedDispatcherService:
             for completed_task in done_set:
                 try:
                     res = completed_task.result()
-                    winner_name = primary_name if completed_task is task_primary else fallback_name
+                    if completed_task is task_primary:
+                        winner_name = primary_name
+                        if primary_lease is not None:
+                            await primary_lease.record_success()
+                        if fallback_lease is not None:
+                            await fallback_lease.record_cancelled()
+                    else:
+                        winner_name = fallback_name
+                        if fallback_lease is not None:
+                            await fallback_lease.record_success()
+                        if primary_lease is not None:
+                            await primary_lease.record_cancelled()
 
                     # Cancel losing task immediately to free connections and stop compute
                     for loser in pending:
@@ -214,6 +276,10 @@ class HedgedDispatcherService:
                     return res, winner_name
                 except Exception as exc:
                     failed_name = primary_name if completed_task is task_primary else fallback_name
+                    if completed_task is task_primary and primary_lease is not None:
+                        await primary_lease.record_failure(exc)
+                    elif completed_task is task_fallback and fallback_lease is not None:
+                        await fallback_lease.record_failure(exc)
                     logger.warning("Hedged task for '%s' failed during race: %s", failed_name, exc)
                     # If other task is still running, loop awaits it; else exits.
 
@@ -226,6 +292,9 @@ class HedgedDispatcherService:
         primary_name: str,
         fallback_name: str | None = None,
         prompt_tokens: int = 0,
+        *,
+        primary_lease: CircuitBreakerLease | None = None,
+        fallback_lease: CircuitBreakerLease | None = None,
     ) -> AsyncIterator[tuple[ChatCompletionChunk, str]]:
         """Stream chunks from winner of a speculative first-chunk race.
 
@@ -239,11 +308,31 @@ class HedgedDispatcherService:
             primary_name: Identifier for primary provider.
             fallback_name: Identifier for fallback provider.
             prompt_tokens: Estimated or actual prompt tokens used for FinOps budget gating.
+            primary_lease: Optional pre-acquired execution lease for the primary provider.
+            fallback_lease: Optional pre-acquired execution lease for the fallback provider.
 
         Yields:
             Tuples of (chunk, provider_name).
         """
         start_time = time.monotonic()
+
+        # Automatically acquire leases if not passed but circuit breaker is available
+        if primary_lease is None and self._circuit_breaker is not None:
+            try:
+                primary_lease = await self._circuit_breaker.acquire_lease(primary_name)
+            except Exception:
+                primary_lease = None
+
+        if (
+            fallback_lease is None
+            and fallback_name is not None
+            and self._circuit_breaker is not None
+        ):
+            try:
+                fallback_lease = await self._circuit_breaker.acquire_lease(fallback_name)
+            except Exception:
+                fallback_lease = None
+
         primary_stream = primary_stream_factory()
 
         # FinOps budget guard: heavy context prompts bypass hedging
@@ -260,11 +349,18 @@ class HedgedDispatcherService:
                     primary_name,
                 )
             first_chunk_emitted = False
-            async for chunk in primary_stream:
-                if not first_chunk_emitted:
-                    await self.record_latency(primary_name, time.monotonic() - start_time)
-                    first_chunk_emitted = True
-                yield chunk, primary_name
+            try:
+                async for chunk in primary_stream:
+                    if not first_chunk_emitted:
+                        if primary_lease is not None:
+                            await primary_lease.record_success()
+                        await self.record_latency(primary_name, time.monotonic() - start_time)
+                        first_chunk_emitted = True
+                    yield chunk, primary_name
+            except Exception as stream_exc:
+                if primary_lease is not None:
+                    await primary_lease.record_failure(stream_exc)
+                raise
             return
 
         hedging_delay = await self.get_hedging_delay(primary_name)
@@ -288,8 +384,14 @@ class HedgedDispatcherService:
         if task_primary in done and not task_primary.cancelled():
             try:
                 winner_name, first_chunk, active_stream = task_primary.result()
+                if primary_lease is not None:
+                    await primary_lease.record_success()
+                if fallback_lease is not None:
+                    await fallback_lease.record_cancelled()
                 await self.record_latency(winner_name, time.monotonic() - start_time)
             except Exception as exc:
+                if primary_lease is not None:
+                    await primary_lease.record_failure(exc)
                 logger.warning(
                     "Primary stream '%s' failed before hedging deadline: %s", primary_name, exc
                 )
@@ -297,8 +399,15 @@ class HedgedDispatcherService:
                 fallback_stream = fallback_stream_factory()
                 winner_name = fallback_name
                 active_stream = fallback_stream
-                first_chunk = await anext(active_stream)
-                await self.record_latency(winner_name, time.monotonic() - start_time)
+                try:
+                    first_chunk = await anext(active_stream)
+                    if fallback_lease is not None:
+                        await fallback_lease.record_success()
+                    await self.record_latency(winner_name, time.monotonic() - start_time)
+                except Exception as fb_exc:
+                    if fallback_lease is not None:
+                        await fallback_lease.record_failure(fb_exc)
+                    raise
         else:
             # Hedging deadline reached without first token: spawn speculative fallback
             logger.info(
@@ -318,6 +427,17 @@ class HedgedDispatcherService:
                 for task in done_set:
                     try:
                         winner_name, first_chunk, active_stream = task.result()
+                        if task is task_primary:
+                            if primary_lease is not None:
+                                await primary_lease.record_success()
+                            if fallback_lease is not None:
+                                await fallback_lease.record_cancelled()
+                        else:
+                            if fallback_lease is not None:
+                                await fallback_lease.record_success()
+                            if primary_lease is not None:
+                                await primary_lease.record_cancelled()
+
                         # Cancel loser task immediately (triggers HTTP/2 RST_STREAM)
                         for loser in pending:
                             loser.cancel()
@@ -331,6 +451,10 @@ class HedgedDispatcherService:
                         )
                         break
                     except Exception as exc:
+                        if task is task_primary and primary_lease is not None:
+                            await primary_lease.record_failure(exc)
+                        elif task is task_fallback and fallback_lease is not None:
+                            await fallback_lease.record_failure(exc)
                         logger.warning("Stream task failed during hedging race: %s", exc)
 
             if not race_won:

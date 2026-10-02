@@ -179,7 +179,7 @@ async def test_api_streaming_client_disconnect(
 
     async with client.stream("POST", "/v1/chat/completions", json=payload) as response:
         assert response.status_code == 200
-        chunks = []
+        chunks: list[str] = []
         async for line in response.aiter_lines():
             if line:
                 chunks.append(line)

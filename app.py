@@ -408,6 +408,6 @@ demo, mount_kwargs = create_gradio_ui()
 app = gr.mount_gradio_app(app, demo, path="/", **mount_kwargs)
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    # В Hugging Face Spaces сервер запускается через demo.launch()
+    # Gradio автоматически подхватит порт и смонтированный FastAPI app
+    demo.launch(server_name="0.0.0.0", server_port=7860, app=app)

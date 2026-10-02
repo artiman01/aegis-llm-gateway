@@ -47,16 +47,19 @@ class InMemoryL2CacheMock:
     """In-memory semantic cache mock."""
 
     def __init__(self) -> None:
-        self.entries: list[tuple[str, list[float], str, ChatCompletionResponse]] = []
+        self.entries: list[tuple[str, list[float], str, ChatCompletionResponse, str | None]] = []
 
     async def search(
         self,
         embedding: list[float],
         model: str,
         similarity_threshold: float,
+        user: str | None = None,
     ) -> tuple[ChatCompletionResponse, float] | None:
-        for _prompt, emb, m, resp in self.entries:
+        for _prompt, emb, m, resp, u in self.entries:
             if m != model:
+                continue
+            if u != user:
                 continue
             # Simple dot product simulation
             sim = sum(a * b for a, b in zip(embedding, emb, strict=False))
@@ -70,9 +73,11 @@ class InMemoryL2CacheMock:
         embedding: list[float],
         model: str,
         response: ChatCompletionResponse,
+        *,
         ttl_seconds: int | None = None,
+        user: str | None = None,
     ) -> None:
-        self.entries.append((prompt, embedding, model, response.model_copy(deep=True)))
+        self.entries.append((prompt, embedding, model, response.model_copy(deep=True), user))
 
     async def clear(self) -> None:
         self.entries.clear()
@@ -211,3 +216,54 @@ async def test_fail_open_on_cache_error(
     broken_svc = SemanticCacheService(l1_cache=BrokenCache())  # type: ignore[arg-type]
     result = await broken_svc.get(sample_request)
     assert result is None  # Does not raise, safely fails open
+
+
+@pytest.mark.asyncio
+async def test_tenant_user_isolation_l1_and_l2(
+    sample_response: ChatCompletionResponse,
+) -> None:
+    """Verify strict tenant/user isolation in both L1 and L2 caches."""
+    l1 = InMemoryL1CacheMock()
+    l2 = InMemoryL2CacheMock()
+    cache_svc = SemanticCacheService(
+        l1_cache=l1,
+        l2_cache=l2,
+        embedding=DummyEmbeddingPort(),
+    )
+
+    req_alice = ChatCompletionRequest(
+        model="gpt-4o",
+        messages=[ChatMessage(role=Role.USER, content="Private data query")],
+        user="user_alice",
+    )
+    req_bob = ChatCompletionRequest(
+        model="gpt-4o",
+        messages=[ChatMessage(role=Role.USER, content="Private data query")],
+        user="user_bob",
+    )
+    req_public = ChatCompletionRequest(
+        model="gpt-4o",
+        messages=[ChatMessage(role=Role.USER, content="Private data query")],
+        user=None,
+    )
+
+    # 1. L1 exact cache keys must be isolated
+    assert req_alice.compute_cache_key() != req_bob.compute_cache_key()
+    assert req_alice.compute_cache_key() != req_public.compute_cache_key()
+    assert "user_alice" in req_alice.compute_cache_key()
+    assert "user_bob" in req_bob.compute_cache_key()
+
+    # 2. Store response under Alice's user context
+    await cache_svc.set(req_alice, sample_response)
+
+    # 3. Alice hits cache
+    hit_alice = await cache_svc.get(req_alice)
+    assert hit_alice is not None
+
+    # 4. Bob misses cache (no cross-user leakage)
+    miss_bob = await cache_svc.get(req_bob)
+    assert miss_bob is None
+
+    # 5. Public query misses cache (no leakage to unauthenticated queries)
+    miss_public = await cache_svc.get(req_public)
+    assert miss_public is None

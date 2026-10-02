@@ -9,7 +9,18 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from enum import StrEnum
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+
+    class StrEnum(str, Enum):  # noqa: UP042
+        """Compatibility fallback for Python < 3.11."""
+
+        pass
+
+
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
@@ -170,6 +181,7 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
     logit_bias: dict[str, float] | None = None
     user: str | None = None
+    tenant_id: str | None = None
     response_format: ResponseFormat | None = None
     seed: int | None = None
     tools: list[ToolDefinition] | None = None
@@ -181,8 +193,10 @@ class ChatCompletionRequest(BaseModel):
     def compute_cache_key(self) -> str:
         """Compute deterministic SHA-256 hash for L1 exact match cache.
 
-        Incorporates model, serialized messages, temperature, top_p, and tools.
+        Incorporates model, serialized messages, temperature, top_p, tools, and
+        the isolating user/tenant_id (or None if shared/public).
         """
+        user_identifier = self.user or self.tenant_id
         canonical_dict = {
             "model": self.model,
             "messages": [
@@ -197,11 +211,15 @@ class ChatCompletionRequest(BaseModel):
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
             "stop": self.stop,
+            "user": user_identifier,
             "response_format": self.response_format.model_dump() if self.response_format else None,
             "tools": [t.model_dump() for t in self.tools] if self.tools else None,
         }
         encoded = json.dumps(canonical_dict, sort_keys=True).encode("utf-8")
-        return f"llm:exact:{hashlib.sha256(encoded).hexdigest()}"
+        digest = hashlib.sha256(encoded).hexdigest()
+        if user_identifier:
+            return f"llm:exact:{user_identifier}:{digest}"
+        return f"llm:exact:{digest}"
 
     def extract_prompt_text(self) -> str:
         """Extract concatenated prompt text for L2 semantic embedding generation."""
@@ -259,6 +277,7 @@ class ChatCompletionResponse(BaseModel):
     system_fingerprint: str | None = None
     _cached_prompt: str | None = PrivateAttr(default=None)
     _cached_embedding: list[float] | None = PrivateAttr(default=None)
+    _cached_user: str | None = PrivateAttr(default=None)
 
     model_config = ConfigDict(extra="ignore")
 

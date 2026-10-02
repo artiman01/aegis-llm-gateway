@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from starlette.requests import Request
 
 from presentation.main import app
 
@@ -149,3 +150,35 @@ async def test_api_invalid_request_error_handling(client: httpx.AsyncClient) -> 
     assert response.status_code in (400, 422)
     data = response.json()
     assert "error" in data or "detail" in data
+
+
+@pytest.mark.asyncio
+async def test_api_streaming_client_disconnect(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Client disconnect terminates generator and cancels upstream task."""
+    call_count = 0
+
+    async def mock_is_disconnected(self: Request) -> bool:
+        nonlocal call_count
+        call_count += 1
+        # Disconnect after the first inspection
+        return call_count > 1
+
+    monkeypatch.setattr(Request, "is_disconnected", mock_is_disconnected)
+
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "Stream me a message that gets aborted"}],
+        "stream": True,
+    }
+
+    async with client.stream("POST", "/v1/chat/completions", json=payload) as response:
+        assert response.status_code == 200
+        chunks = []
+        async for line in response.aiter_lines():
+            if line:
+                chunks.append(line)
+
+    # Disconnect prevented emitting full [DONE] terminating sequence
+    assert "data: [DONE]" not in chunks

@@ -46,6 +46,7 @@ class L2SemanticCachePort(Protocol):
         embedding: list[float],
         model: str,
         similarity_threshold: float,
+        user: str | None = None,
     ) -> tuple[ChatCompletionResponse, float] | None:
         """Find most similar cached completion matching embedding above threshold.
 
@@ -59,7 +60,9 @@ class L2SemanticCachePort(Protocol):
         embedding: list[float],
         model: str,
         response: ChatCompletionResponse,
+        *,
         ttl_seconds: int | None = None,
+        user: str | None = None,
     ) -> None:
         """Index a prompt, embedding vector, and response into the semantic cache."""
         ...

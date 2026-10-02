@@ -84,6 +84,7 @@ class DummyL2Cache:
         embedding: list[float],
         model: str,
         similarity_threshold: float,
+        user: str | None = None,
     ) -> tuple[ChatCompletionResponse, float] | None:
         return None
 
@@ -93,7 +94,9 @@ class DummyL2Cache:
         embedding: list[float],
         model: str,
         response: ChatCompletionResponse,
+        *,
         ttl_seconds: int | None = None,
+        user: str | None = None,
     ) -> None:
         pass
 

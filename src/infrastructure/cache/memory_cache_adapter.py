@@ -103,6 +103,7 @@ class _SemanticEntry:
     embedding: list[float]
     model: str
     payload: bytes
+    user: str | None = None
     expires_at: float | None = None
 
     def is_expired(self, now: float) -> bool:
@@ -134,6 +135,7 @@ class MemorySemanticCacheAdapter(L2SemanticCachePort):
         embedding: list[float],
         model: str,
         similarity_threshold: float,
+        user: str | None = None,
     ) -> tuple[ChatCompletionResponse, float] | None:
         """Search candidate entries for highest cosine similarity above threshold."""
         now = time.monotonic()
@@ -150,6 +152,12 @@ class MemorySemanticCacheAdapter(L2SemanticCachePort):
                 if entry.model != model:
                     continue
 
+                # Strict user/tenant isolation:
+                # If user is provided, match only entries for that exact user.
+                # If user is None (public/shared), match only public entries.
+                if entry.user != user:
+                    continue
+
                 sim = self._cosine_similarity(embedding, entry.embedding)
                 if sim >= similarity_threshold and sim > best_score:
                     best_score = sim
@@ -162,6 +170,7 @@ class MemorySemanticCacheAdapter(L2SemanticCachePort):
                 response = ChatCompletionResponse.model_validate(data)
                 response._cached_prompt = best_match.prompt
                 response._cached_embedding = best_match.embedding
+                response._cached_user = best_match.user
                 return response, best_score
 
             return None
@@ -172,7 +181,9 @@ class MemorySemanticCacheAdapter(L2SemanticCachePort):
         embedding: list[float],
         model: str,
         response: ChatCompletionResponse,
+        *,
         ttl_seconds: int | None = None,
+        user: str | None = None,
     ) -> None:
         """Store prompt, embedding, and response in semantic index."""
         now = time.monotonic()
@@ -192,6 +203,7 @@ class MemorySemanticCacheAdapter(L2SemanticCachePort):
                     embedding=embedding,
                     model=model,
                     payload=payload,
+                    user=user,
                     expires_at=expires_at,
                 )
             )

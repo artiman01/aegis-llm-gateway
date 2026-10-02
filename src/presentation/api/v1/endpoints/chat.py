@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -18,8 +20,8 @@ from application.use_cases.stream_chat_completion_use_case import (
     StreamChatCompletionUseCase,
 )
 from domain.models.chat import (
+    ChatCompletionChunk,
     ChatCompletionRequest,
-    ChatCompletionResponse,
 )
 from infrastructure.observability.prometheus_metrics_adapter import (
     PrometheusMetricsAdapter,
@@ -59,12 +61,14 @@ def get_circuit_breaker_service(request: Request) -> CircuitBreakerService:
     ),
 )
 async def create_chat_completion(
+    request: Request,
     chat_request: ChatCompletionRequest,
+    *,
     cache_control: str | None = Header(default=None),
     x_aegis_no_cache: str | None = Header(default=None),
     route_use_case: RouteChatCompletionUseCase = Depends(get_route_use_case),
     stream_use_case: StreamChatCompletionUseCase = Depends(get_stream_use_case),
-) -> ChatCompletionResponse | StreamingResponse:
+) -> Response | StreamingResponse:
     """Dispatches chat completions to primary or fallback providers with optional SSE streaming."""
     bypass_cache = False
     if cache_control and "no-cache" in cache_control.lower():
@@ -88,9 +92,49 @@ async def create_chat_completion(
         )
 
     async def sse_stream_generator() -> AsyncIterator[str]:
-        async for chunk in stream_use_case.execute(chat_request):
-            yield chunk.to_sse_event()
-        yield "data: [DONE]\n\n"
+        queue: asyncio.Queue[ChatCompletionChunk | None] = asyncio.Queue(maxsize=32)
+        exception_holder: list[BaseException] = []
+
+        async def _upstream_worker() -> None:
+            try:
+                async for chunk in stream_use_case.execute(chat_request):
+                    await queue.put(chunk)
+            except BaseException as exc:
+                exception_holder.append(exc)
+            finally:
+                await queue.put(None)
+
+        upstream_task = asyncio.create_task(_upstream_worker())
+
+        try:
+            while True:
+                if await request.is_disconnected():
+                    logger.info("Client disconnected during SSE stream; cancelling upstream task.")
+                    upstream_task.cancel()
+                    break
+
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except TimeoutError:
+                    continue
+
+                if item is None:
+                    if exception_holder:
+                        exc = exception_holder[0]
+                        if not isinstance(exc, asyncio.CancelledError):
+                            raise exc
+                    break
+
+                yield item.to_sse_event()
+
+            if not await request.is_disconnected() and not exception_holder:
+                yield "data: [DONE]\n\n"
+
+        finally:
+            if not upstream_task.done():
+                upstream_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await upstream_task
 
     return StreamingResponse(
         sse_stream_generator(),

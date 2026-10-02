@@ -12,7 +12,7 @@ pinned: false
 
 > **Production-grade, resilient, observable LLM Gateway built with Hexagonal Architecture.**
 
-AegisLLM is an enterprise gateway designed to protect against downstream model outages, eliminate vendor lock-in, slash LLM inferencing costs via a two-tier caching strategy (exact SHA-256 + ONNX semantic embeddings), and guarantee 99.99% availability via state-machine circuit breakers.
+AegisLLM is an enterprise gateway designed to protect against downstream model outages, eliminate vendor lock-in, and slash LLM inferencing costs via a two-tier caching strategy (exact SHA-256 + ONNX semantic embeddings). Designed for High Availability via multi-provider failover, FSM Circuit Breaking, and speculative hedged dispatching.
 
 ---
 

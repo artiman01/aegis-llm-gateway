@@ -74,10 +74,12 @@ class SemanticCacheService:
                 prompt_text = request.extract_prompt_text()
                 if prompt_text:
                     query_embedding = await self._embedding.embed_text(prompt_text)
+                    user_identifier = request.user or request.tenant_id
                     match = await self._l2_cache.search(
                         embedding=query_embedding,
                         model=request.model,
                         similarity_threshold=self._similarity_threshold,
+                        user=user_identifier,
                     )
                     if match is not None:
                         cached_l2, score = match
@@ -144,12 +146,14 @@ class SemanticCacheService:
                 prompt_text = request.extract_prompt_text()
                 if prompt_text:
                     query_embedding = await self._embedding.embed_text(prompt_text)
+                    user_identifier = request.user or request.tenant_id
                     await self._l2_cache.store(
                         prompt=prompt_text,
                         embedding=query_embedding,
                         model=request.model,
                         response=response,
                         ttl_seconds=self._l2_ttl_seconds,
+                        user=user_identifier,
                     )
             except Exception as e:
                 logger.warning("L2 semantic cache write failed: %s", e)

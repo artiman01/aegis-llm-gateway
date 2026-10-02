@@ -28,12 +28,26 @@ router = APIRouter(tags=["Chat Completions"])
 
 
 def get_route_use_case(request: Request) -> RouteChatCompletionUseCase:
-    """Dependency retrieving RouteChatCompletionUseCase from application state."""
+    """Dependency retrieving RouteChatCompletionUseCase from application state.
+
+    Args:
+        request: Incoming HTTP request.
+
+    Returns:
+        Configured RouteChatCompletionUseCase instance.
+    """
     return request.app.state.route_use_case  # type: ignore[no-any-return]
 
 
 def get_stream_use_case(request: Request) -> StreamChatCompletionUseCase:
-    """Dependency retrieving StreamChatCompletionUseCase from application state."""
+    """Dependency retrieving StreamChatCompletionUseCase from application state.
+
+    Args:
+        request: Incoming HTTP request.
+
+    Returns:
+        Configured StreamChatCompletionUseCase instance.
+    """
     return request.app.state.stream_use_case  # type: ignore[no-any-return]
 
 

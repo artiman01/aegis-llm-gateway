@@ -56,17 +56,22 @@ logging.basicConfig(
 logger = logging.getLogger("aegisllm.app")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan context managing lifecycle, pools, and DEMO_MODE."""
+def initialize_gateway_state(app: FastAPI, force: bool = False) -> None:
+    """Initialize observability, caches, providers, and use cases on application state.
+
+    Args:
+        app: Target FastAPI application instance.
+        force: If True, re-initializes components regardless of existing state.
+    """
+    if not force and hasattr(app.state, "route_use_case") and app.state.route_use_case is not None:
+        return
+
     logger.info("Initializing AegisLLM Gateway components...")
 
-    # Observability and circuit breaker
     metrics_registry = CollectorRegistry(auto_describe=True)
     metrics_adapter = PrometheusMetricsAdapter(registry=metrics_registry)
     circuit_breaker = CircuitBreakerService(metrics=metrics_adapter)
 
-    # Caching infrastructure (L1 & L2)
     redis_url = os.getenv("REDIS_URL")
     redis_adapter: RedisCacheAdapter | None = None
     l1_cache: Any
@@ -109,7 +114,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     streaming_dfa = StreamingDFAAutomaton()
 
-    # Provider configuration and DEMO_MODE evaluation
     openai_key = os.getenv("OPENAI_API_KEY", "").strip()
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     force_demo = os.getenv("DEMO_MODE", "false").lower() in ("true", "1")
@@ -186,7 +190,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             fallback_providers=["anthropic", "mock_fallback"],
         )
 
-    # Use case orchestration
     route_use_case = RouteChatCompletionUseCase(
         providers=providers,
         provider_configs=provider_configs,
@@ -209,7 +212,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         default_provider=next(iter(providers)),
     )
 
-    # Application state registration
     app.state.metrics_adapter = metrics_adapter
     app.state.circuit_breaker = circuit_breaker
     app.state.cache_service = cache_service
@@ -220,18 +222,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.route_use_case = route_use_case
     app.state.stream_use_case = stream_use_case
     app.state.providers = providers
+    app.state.redis_adapter = redis_adapter
     app.state.registered_providers = list(providers.keys())
     app.state.available_models = ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet-20241022", "mock"]
     app.state.demo_mode = demo_mode
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Application lifespan context managing lifecycle, pools, and DEMO_MODE.
+
+    Args:
+        app: Target FastAPI application instance.
+
+    Yields:
+        None after runtime initialization.
+    """
+    initialize_gateway_state(app, force=True)
     logger.info("AegisLLM Gateway started successfully. Serving requests.")
     yield
 
-    # Shutdown logic
     logger.info("Shutting down AegisLLM Gateway...")
+    providers: dict[str, LLMProviderPort] = getattr(app.state, "providers", {})
     for p in providers.values():
         if hasattr(p, "aclose"):
             await p.aclose()
+    redis_adapter: RedisCacheAdapter | None = getattr(app.state, "redis_adapter", None)
     if redis_adapter is not None:
         await redis_adapter.aclose()
     logger.info("AegisLLM Gateway shutdown complete.")
@@ -274,9 +290,10 @@ Production-grade, resilient, observable LLM Gateway built with Hexagonal Archite
     app.add_middleware(LoggingMiddleware)
     app.add_middleware(AuthMiddleware)
 
-    # Register Routers
     app.include_router(system_router)
     app.include_router(chat_router)
+
+    initialize_gateway_state(app)
 
     return app
 

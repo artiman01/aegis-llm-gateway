@@ -10,7 +10,6 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-# Ensure project root and src are on the python path
 root_dir = Path(__file__).resolve().parent
 src_dir = root_dir / "src"
 for p in (str(root_dir), str(src_dir)):
@@ -20,7 +19,7 @@ for p in (str(root_dir), str(src_dir)):
 import gradio as gr
 import httpx
 
-from src.presentation.main import app
+from presentation.main import app
 
 CUSTOM_CSS = """
 :root {
@@ -210,7 +209,11 @@ async def send_chat_completion(
 
 
 def create_gradio_ui() -> tuple[gr.Blocks, dict[str, Any]]:
-    """Build Gradio UI interface for AegisLLM Gateway."""
+    """Build Gradio UI interface for AegisLLM Gateway.
+
+    Returns:
+        Tuple containing initialized Blocks instance and mounting kwargs.
+    """
     theme = gr.themes.Soft(
         primary_hue="indigo",
         secondary_hue="blue",
@@ -403,7 +406,8 @@ def create_gradio_ui() -> tuple[gr.Blocks, dict[str, Any]]:
     return demo, mount_kwargs
 
 
-#demo, _ = create_gradio_ui()
+demo, mount_kwargs = create_gradio_ui()
+app = gr.mount_gradio_app(app, demo, path="/", **mount_kwargs)
 
 if __name__ == "__main__":
     demo.launch()

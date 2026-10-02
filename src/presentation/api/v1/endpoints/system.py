@@ -18,12 +18,26 @@ router = APIRouter(tags=["System"])
 
 
 def get_circuit_breaker_service(request: Request) -> CircuitBreakerService:
-    """Dependency retrieving CircuitBreakerService from application state."""
+    """Dependency retrieving CircuitBreakerService from application state.
+
+    Args:
+        request: Incoming HTTP request.
+
+    Returns:
+        Configured CircuitBreakerService instance.
+    """
     return request.app.state.circuit_breaker  # type: ignore[no-any-return]
 
 
 def get_metrics_adapter(request: Request) -> PrometheusMetricsAdapter:
-    """Dependency retrieving PrometheusMetricsAdapter from application state."""
+    """Dependency retrieving PrometheusMetricsAdapter from application state.
+
+    Args:
+        request: Incoming HTTP request.
+
+    Returns:
+        Configured PrometheusMetricsAdapter instance.
+    """
     return request.app.state.metrics_adapter  # type: ignore[no-any-return]
 
 

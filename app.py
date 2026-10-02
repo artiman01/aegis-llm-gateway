@@ -403,11 +403,7 @@ def create_gradio_ui() -> tuple[gr.Blocks, dict[str, Any]]:
     return demo, mount_kwargs
 
 
-# Create Gradio demo and mount onto the existing FastAPI application
-demo, mount_kwargs = create_gradio_ui()
-app = gr.mount_gradio_app(app, demo, path="/", **mount_kwargs)
+#demo, _ = create_gradio_ui()
 
 if __name__ == "__main__":
-    # В Hugging Face Spaces сервер запускается через demo.launch()
-    # Gradio автоматически подхватит порт и смонтированный FastAPI app
-    demo.launch(server_name="0.0.0.0", server_port=7860, app=app)
+    demo.launch()

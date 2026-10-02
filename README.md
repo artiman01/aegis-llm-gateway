@@ -1,3 +1,13 @@
+---
+title: AegisLLM Gateway
+emoji: 🛡️
+colorFrom: blue
+colorTo: sky
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
 # AegisLLM Gateway
 
 > **Production-grade, resilient, observable LLM Gateway built with Hexagonal Architecture.**

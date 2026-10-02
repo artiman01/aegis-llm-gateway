@@ -1,0 +1,63 @@
+version: "3.8"
+
+services:
+  aegis-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aegis-gateway
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    environment:
+      - PORT=7860
+      - REDIS_URL=redis://redis:6379/0
+      - DEMO_MODE=true # Automatically uses MockProvider if real keys are absent
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - L2_SIMILARITY_THRESHOLD=0.90
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - aegis-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: aegis-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis-data:/data
+    networks:
+      - aegis-net
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: aegis-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - aegis-net
+
+networks:
+  aegis-net:
+    driver: bridge
+
+volumes:
+  redis-data:
+  prometheus-data:

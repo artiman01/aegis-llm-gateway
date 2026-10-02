@@ -73,7 +73,19 @@ async def create_chat_completion(
         bypass_cache = True
 
     if not chat_request.stream:
-        return await route_use_case.execute(chat_request, bypass_cache=bypass_cache)
+        comp_response = await route_use_case.execute(chat_request, bypass_cache=bypass_cache)
+        cache_status = "MISS"
+        if bypass_cache:
+            cache_status = "BYPASS"
+        elif comp_response.system_fingerprint and "cache:" in comp_response.system_fingerprint:
+            cache_type = comp_response.system_fingerprint.replace("cache:", "").upper()
+            cache_status = f"HIT ({cache_type})"
+
+        return Response(
+            content=comp_response.model_dump_json(),
+            media_type="application/json",
+            headers={"X-Cache-Status": cache_status},
+        )
 
     async def sse_stream_generator() -> AsyncIterator[str]:
         async for chunk in stream_use_case.execute(chat_request):
@@ -87,6 +99,7 @@ async def create_chat_completion(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "X-Cache-Status": "BYPASS (STREAM)",
         },
     )
 

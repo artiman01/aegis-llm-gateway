@@ -99,6 +99,7 @@ known-first-party = ["domain", "application", "infrastructure", "presentation", 
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*" = ["ARG001", "ARG002", "PLR2004", "PT011"]
+"app.py" = ["E402", "PLR0917"]
 
 [tool.mypy]
 python_version = "3.11"

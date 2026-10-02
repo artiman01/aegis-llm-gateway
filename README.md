@@ -11,43 +11,86 @@ AegisLLM is an enterprise gateway designed to protect against downstream model o
 ### System Context Diagram (Level 1)
 
 ```mermaid
-C4Context
-    title System Context Diagram for AegisLLM Gateway
+flowchart TD
+    subgraph Clients ["Downstream Consumers"]
+        Client["Web Apps / Autonomous Agents / Microservices<br/><i>(OpenAI-compatible clients)</i>"]
+    end
 
-    Person(client, "Downstream Services", "Web apps, Agents, Microservices consuming OpenAI-compatible APIs")
-    System(aegis, "AegisLLM Gateway", "Resilient Hexagonal LLM Proxy with circuit breaking, two-tier cache, and fallback routing")
-    System_Ext(openai, "OpenAI API", "Upstream GPT-4o / GPT-4o-mini provider")
-    System_Ext(anthropic, "Anthropic API", "Upstream Claude 3.5 Sonnet / Haiku provider")
-    System_Ext(redis, "Redis Cluster", "Distributed L1 exact hash cache")
-    System_Ext(prometheus, "Prometheus", "Metrics collection and alerting")
+    subgraph Aegis ["AegisLLM Resilience Perimeter"]
+        Gateway["<b>AegisLLM Gateway</b><br/>High-Performance Proxy, Circuit Breaker & Semantic Router"]
+    end
 
-    Rel(client, aegis, "POST /v1/chat/completions", "JSON / SSE over HTTP/2")
-    Rel(aegis, redis, "Get / Set Exact Hash", "RESP")
-    Rel(aegis, openai, "Forward completions / streams", "HTTPS / HTTP/2")
-    Rel(aegis, anthropic, "Fallback completions / streams", "HTTPS / HTTP/2")
-    Rel(prometheus, aegis, "Scrape /metrics", "HTTP")
+    subgraph Storage ["Storage & Telemetry"]
+        Redis[("<b>Redis Cluster</b><br/>L1 Hash Cache & Sliding Limits")]
+        Prometheus[("<b>Prometheus</b><br/>TTFT, P95 & FSM Metrics")]
+    end
+
+    subgraph Upstream ["Upstream Intelligence Providers"]
+        OpenAI["<b>OpenAI API</b><br/>Primary Upstream (HTTP/2)"]
+        Anthropic["<b>Anthropic API</b><br/>Hedged Speculative Fallback"]
+    end
+
+    Client ==>|"POST /v1/chat/completions<br/>(JSON / SSE Stream)"| Gateway
+    Gateway <-->|"L1 Cache Lookup / Store"| Redis
+    Gateway -.->|"/metrics scrape"| Prometheus
+    Gateway -->|"Primary Speculative Stream"| OpenAI
+    Gateway -.->|"Hedged Fallback (P90 Trigger)"| Anthropic
+
+    style Gateway fill:#0284c7,stroke:#38bdf8,stroke-width:2px,color:#ffffff
+    style Redis fill:#334155,stroke:#64748b,stroke-width:1px,color:#f8fafc
+    style Prometheus fill:#334155,stroke:#64748b,stroke-width:1px,color:#f8fafc
+    style OpenAI fill:#1e293b,stroke:#475569,stroke-width:1px,color:#f8fafc
+    style Anthropic fill:#1e293b,stroke:#475569,stroke-width:1px,color:#f8fafc
+    style Client fill:#0f172a,stroke:#334155,stroke-width:1px,color:#cbd5e1
 ```
 
-### Container Diagram (Level 2)
+### Container Diagram (Level 2 — Hexagonal Architecture)
 
 ```mermaid
-C4Container
-    title Container Diagram for AegisLLM Gateway
+flowchart LR
+    subgraph Presentation ["Presentation Layer (FastAPI)"]
+        direction TB
+        API["<b>REST API Controller</b><br/>/v1/chat/completions"]
+        MW["<b>Pipeline Middlewares</b><br/>Timing, Logging, Security, Error Handler"]
+    end
 
-    Container_Boundary(c1, "AegisLLM Core Service") {
-        Component(api, "Presentation Layer", "FastAPI, SSE Handlers, Middlewares", "Exposes /v1/chat/completions")
-        Component(usecase, "Application Layer", "RouteChatCompletionUseCase, StreamChatCompletionUseCase", "Coordinates routing, caching, and resiliency")
-        Component(cb, "Circuit Breaker Service", "Closed, Open, Half-Open FSM", "Isolates upstream provider faults")
-        Component(cache_svc, "Semantic Cache Service", "FastEmbed ONNX + Cosine Similarity", "Evaluates L2 semantic matches")
-        Component(domain, "Domain Layer", "Protocols, Exceptions, Chat/Provider Models", "Pure business logic without external dependencies")
-        Component(adapters, "Infrastructure Adapters", "OpenAIAdapter, AnthropicAdapter, RedisCacheAdapter, PrometheusAdapter", "Implements domain ports")
-    }
+    subgraph Core ["Application Core & Domain Layer"]
+        direction TB
+        UseCases["<b>Route & Stream Use Cases</b><br/>Execution & Failover Coordinator"]
+        
+        subgraph Services ["Domain Services"]
+            Hedged["<b>Hedged Dispatcher</b><br/>P90 TTFT Speculative Race"]
+            CB["<b>Circuit Breaker FSM</b><br/>Closed / Open / Half-Open"]
+            Saliency["<b>Saliency Guard</b><br/>Temporal & Lexical Invariant Check"]
+        end
+    end
 
-    Rel(api, usecase, "Dispatches requests to")
-    Rel(usecase, cb, "Consults provider availability")
-    Rel(usecase, cache_svc, "Checks L1 / L2 cache")
-    Rel(usecase, domain, "Uses models & ports")
-    Rel(adapters, domain, "Implements ports")
+    subgraph Infrastructure ["Infrastructure Adapters"]
+        direction TB
+        subgraph NetAdapters ["Network Providers"]
+            OpenAIAdapter["OpenAI HTTP/2 Adapter"]
+            AnthropicAdapter["Anthropic Schema Adapter"]
+        end
+        subgraph CacheAdapters ["Cache & Math"]
+            ZCA["ZCA Whitening & FastEmbed"]
+            RedisAdapter["Redis L1 & L2 Store"]
+            DFA["Streaming DFA Redactor"]
+        end
+    end
+
+    API --> MW
+    MW --> UseCases
+    UseCases --> Services
+    
+    Hedged --> NetAdapters
+    Hedged --> DFA
+    Saliency --> CacheAdapters
+    CB --> NetAdapters
+
+    style Core fill:#0f172a,stroke:#0284c7,stroke-width:2px,color:#ffffff
+    style Presentation fill:#1e293b,stroke:#475569,stroke-width:1px,color:#f8fafc
+    style Infrastructure fill:#1e293b,stroke:#475569,stroke-width:1px,color:#f8fafc
+    style Services fill:#1e293b,stroke:#334155,stroke-width:1px,color:#cbd5e1
 ```
 
 ---

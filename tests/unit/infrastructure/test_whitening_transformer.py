@@ -25,6 +25,13 @@ class TestWhiteningTransformer:
         assert pytest.approx(whitened[0], abs=1e-6) == 0.6
         assert pytest.approx(whitened[1], abs=1e-6) == 0.8
 
+    def test_epsilon_positive_validation(self) -> None:
+        """Verify non-positive epsilon values are rejected."""
+        with pytest.raises(ValueError, match="must be positive"):
+            WhiteningTransformer(dimension=4, epsilon=0.0)
+        with pytest.raises(ValueError, match="must be positive"):
+            WhiteningTransformer(dimension=4, epsilon=-1e-5)
+
     def test_fit_validation_errors(self) -> None:
         """Verify dimension and sample size validations during fitting."""
         transformer = WhiteningTransformer(dimension=8)

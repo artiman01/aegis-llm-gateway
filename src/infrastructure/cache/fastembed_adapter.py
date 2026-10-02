@@ -22,17 +22,25 @@ class FastEmbedAdapter(EmbeddingPort):
         dimension: int = 384,
         cache_dir: str | None = None,
         threads: int | None = None,
+        max_concurrent: int = 16,
     ) -> None:
         self._model_name = model_name
         self._dimension = dimension
         self._cache_dir = cache_dir
         self._threads = threads
+        self._max_concurrent = max_concurrent
         self._model: TextEmbedding | None = None
         self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(max_concurrent)
 
     @property
     def dimension(self) -> int:
         return self._dimension
+
+    @property
+    def semaphore(self) -> asyncio.Semaphore:
+        """Internal concurrency limit semaphore."""
+        return self._semaphore
 
     def _get_or_load_model(self) -> TextEmbedding:
         """Synchronously load FastEmbed ONNX weights on first invocation (lazy loading)."""
@@ -61,13 +69,22 @@ class FastEmbedAdapter(EmbeddingPort):
         if not texts:
             return []
 
-        # Ensure model initialization doesn't race on first call
-        if self._model is None:
-            async with self._lock:
-                if self._model is None:
-                    await asyncio.to_thread(self._get_or_load_model)
+        # Threadpool exhaustion guard: fail-fast if concurrency limit reached
+        if self._semaphore.locked():
+            logger.warning(
+                "FastEmbed exhaustion guard: %d concurrent operations active; failing open",
+                self._max_concurrent,
+            )
+            raise RuntimeError(f"FastEmbed concurrency limit of {self._max_concurrent} exceeded")
 
-        return await asyncio.to_thread(self._embed_sync, texts)
+        async with self._semaphore:
+            # Ensure model initialization doesn't race on first call
+            if self._model is None:
+                async with self._lock:
+                    if self._model is None:
+                        await asyncio.to_thread(self._get_or_load_model)
+
+            return await asyncio.to_thread(self._embed_sync, texts)
 
     async def embed_text(self, text: str) -> list[float]:
         """Generate embedding vector for a single prompt."""

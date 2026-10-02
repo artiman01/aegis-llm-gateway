@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     l2_cache = MemorySemanticCacheAdapter()
     embedding_adapter = FastEmbedAdapter()
-    whitening_transformer = WhiteningTransformer(dimension=384)
+    whitening_transformer = WhiteningTransformer(dimension=384, epsilon=1e-5)
     saliency_guard = SaliencyGuardService(
         whitening=whitening_transformer,
         similarity_threshold=float(os.getenv("L2_SIMILARITY_THRESHOLD", "0.90")),
@@ -100,7 +100,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         similarity_threshold=float(os.getenv("L2_SIMILARITY_THRESHOLD", "0.90")),
     )
 
-    hedged_dispatcher = HedgedDispatcherService(metrics=metrics_adapter)
+    hedged_dispatcher = HedgedDispatcherService(
+        metrics=metrics_adapter,
+        max_hedging_prompt_tokens=int(os.getenv("MAX_HEDGING_PROMPT_TOKENS", "2000")),
+    )
     streaming_dfa = StreamingDFAAutomaton()
 
     # Provider configuration and DEMO_MODE evaluation

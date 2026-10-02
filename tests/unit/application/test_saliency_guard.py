@@ -120,3 +120,29 @@ def test_saliency_guard_valid_semantic_hit(
     assert is_valid is True
     assert reason == "verified_hit"
     assert score >= 0.85
+
+
+def test_saliency_guard_cyrillic_temporal_drift_rejection(
+    calibrated_guard: SaliencyGuardService,
+    base_vectors: tuple[list[float], list[float]],
+) -> None:
+    """Russian queries with different years must trigger CACHE MISS.
+
+    Guarantees temporal drift protection in Cyrillic texts.
+    """
+    query_vec, cached_vec = base_vectors
+    query_text = "Кто мэр Москвы в 2024 году"
+    cached_text = "Кто мэр Москвы в 2020 году"
+
+    is_valid, score, reason = calibrated_guard.verify_cache_candidate(
+        query_text=query_text,
+        query_vec=query_vec,
+        cached_text=cached_text,
+        cached_vec=cached_vec,
+    )
+
+    # Must pass Phase 1 (cosine similarity > 0.85) but FAIL Phase 2 (year mismatch 2024 != 2020)
+    assert score >= 0.85
+    assert is_valid is False
+    assert "saliency_invariant_mismatch" in reason
+    assert "2020" in reason or "2024" in reason

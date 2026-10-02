@@ -80,3 +80,17 @@ async def test_fastembed_embed_batch() -> None:
         assert len(results[0]) == 384
         assert results[0][0] == 0.1
         assert results[1][0] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_fastembed_threadpool_exhaustion_guard() -> None:
+    """FastEmbedAdapter must raise RuntimeError when concurrency limit is saturated."""
+    adapter = FastEmbedAdapter(max_concurrent=1)
+
+    # Acquire the single available semaphore slot to simulate active threadpool computation
+    await adapter.semaphore.acquire()
+
+    with pytest.raises(RuntimeError, match="concurrency limit of 1 exceeded"):
+        await adapter.embed_text("Overload prompt")
+
+    adapter.semaphore.release()

@@ -25,6 +25,10 @@ class WhiteningTransformer(WhiteningPort):
             dimension: Dimensionality of input embeddings (default 384 for all-MiniLM-L6-v2).
             epsilon: Regularization parameter added to eigenvalues for numerical stability.
         """
+        if epsilon <= 0.0:
+            raise ValueError(
+                f"Whitening regularization parameter epsilon must be positive, got {epsilon}"
+            )
         self._dim = dimension
         self._epsilon = epsilon
         self._mean: np.ndarray | None = None
@@ -71,8 +75,10 @@ class WhiteningTransformer(WhiteningPort):
         # For symmetric covariance, U == V
         u, singular_values, _ = np.linalg.svd(covariance, full_matrices=True)
 
-        # 4. Construct inverse square-root scaling matrix
-        inv_sqrt_singular = 1.0 / np.sqrt(singular_values + self._epsilon)
+        # 4. Construct inverse square-root scaling matrix with strict division-by-zero protection
+        # Under severe rank deficiency, clamping singular values prevents zero/negative denominators
+        safe_singular = np.maximum(singular_values, 0.0) + self._epsilon
+        inv_sqrt_singular = 1.0 / np.sqrt(safe_singular)
         scaling_matrix = np.diag(inv_sqrt_singular)
 
         # 5. Compute ZCA-Whitening matrix: W_ZCA = U * S^(-1/2) * U^T

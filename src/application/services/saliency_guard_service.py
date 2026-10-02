@@ -13,16 +13,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Precompiled regex patterns for high-speed lexical saliency invariant extraction
-_NUMERIC_PATTERN = re.compile(r"\b\d+(?:\.\d+)?\b")
-_DATE_YEAR_PATTERN = re.compile(r"\b(?:19|20)\d{2}\b")
-_ISO_DATE_PATTERN = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
-_IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z]+[-_]\d+\b", re.IGNORECASE)
-_NAMED_ENTITY_PATTERN = re.compile(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*\b")
-_ACRONYM_PATTERN = re.compile(r"\b[A-Z]{2,}\b")
+# with full Unicode/Cyrillic support
+_NUMERIC_PATTERN = re.compile(r"\b\d+(?:[\.,]\d+)?\b", re.UNICODE)
+_DATE_YEAR_PATTERN = re.compile(
+    r"\b((?:19|20)\d{2})(?:\s*(?:г\.|года|году|год|г))?\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_ISO_DATE_PATTERN = re.compile(r"\b\d{4}-\d{2}-\d{2}\b", re.UNICODE)
+_RU_DATE_PATTERN = re.compile(
+    r"\b\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)"
+    r"(?:\s+\d{4}(?:\s*г\.?)?)?\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-zА-ЯЁа-яё]+[-_]\d+\b", re.IGNORECASE | re.UNICODE)
+_NAMED_ENTITY_PATTERN = re.compile(
+    r"\b[A-ZА-ЯЁ][a-zа-яё]{1,}(?:\s+[A-ZА-ЯЁ][a-zа-яё]{1,})*\b",
+    re.UNICODE,
+)
+_ACRONYM_PATTERN = re.compile(r"\b[A-ZА-ЯЁ]{2,}\b", re.UNICODE)
 
-# Common sentence starters and English stopwords to avoid false-positive entity extraction
+# Common sentence starters and English/Russian stopwords to avoid false-positive entity extraction
 _SENTENCE_STARTER_STOPWORDS: frozenset[str] = frozenset(
     {
+        # English stopwords
         "The",
         "A",
         "An",
@@ -69,6 +82,63 @@ _SENTENCE_STARTER_STOPWORDS: frozenset[str] = frozenset(
         "By",
         "As",
         "Of",
+        # Russian stopwords / sentence starters
+        "Кто",
+        "Что",
+        "Где",
+        "Когда",
+        "Куда",
+        "Откуда",
+        "Почему",
+        "Зачем",
+        "Как",
+        "Сколько",
+        "Какой",
+        "Какая",
+        "Какие",
+        "Какое",
+        "Каким",
+        "Каком",
+        "Пожалуйста",
+        "Подскажи",
+        "Расскажи",
+        "Опиши",
+        "Покажи",
+        "Найди",
+        "Напиши",
+        "Объясни",
+        "Проверь",
+        "Дай",
+        "Список",
+        "Есть",
+        "Был",
+        "Была",
+        "Были",
+        "Было",
+        "Будет",
+        "Будут",
+        "В",
+        "Во",
+        "На",
+        "С",
+        "Со",
+        "По",
+        "К",
+        "Ко",
+        "Из",
+        "О",
+        "Об",
+        "Обо",
+        "От",
+        "До",
+        "Для",
+        "При",
+        "За",
+        "И",
+        "А",
+        "Но",
+        "Да",
+        "Или",
     }
 )
 
@@ -139,19 +209,24 @@ class SaliencyGuardService:
 
         # 1. Numeric and temporal invariants
         for num in _NUMERIC_PATTERN.findall(text):
-            invariants.add(f"num:{num}")
+            # Normalize comma decimal separators to dots (e.g. 15,5 -> 15.5)
+            normalized_num = num.replace(",", ".")
+            invariants.add(f"num:{normalized_num}")
 
         for date in _ISO_DATE_PATTERN.findall(text):
             invariants.add(f"date:{date}")
 
-        for year in _DATE_YEAR_PATTERN.findall(text):
-            invariants.add(f"year:{year}")
+        for ru_date in _RU_DATE_PATTERN.findall(text):
+            invariants.add(f"date:{ru_date.strip().lower()}")
 
-        # 2. Key identifiers (e.g. ID-1, CVE-2023-1234, TASK-42)
+        for year_match in _DATE_YEAR_PATTERN.finditer(text):
+            invariants.add(f"year:{year_match.group(1)}")
+
+        # 2. Key identifiers (e.g. ID-1, CVE-2023-1234, TASK-42, ТИКЕТ-99)
         for identifier in _IDENTIFIER_PATTERN.findall(text):
             invariants.add(f"id:{identifier.upper()}")
 
-        # 3. Capitalized named entities & acronyms
+        # 3. Capitalized named entities & acronyms (Latin and Cyrillic)
         for entity in _NAMED_ENTITY_PATTERN.findall(text):
             cleaned = entity.strip()
             if cleaned not in _SENTENCE_STARTER_STOPWORDS:

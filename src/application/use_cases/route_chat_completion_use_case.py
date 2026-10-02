@@ -96,8 +96,10 @@ class RouteChatCompletionUseCase:
                         up_m2 = cfg2.get_upstream_model(request.model)
                         return await p2.complete(request.model_copy(update={"model": up_m2}), cfg2)
 
+                    prompt_text = request.extract_prompt_text()
+                    prompt_tokens = max(1, len(prompt_text) // 4)
                     response, winner_name = await self._hedged_dispatcher.execute_hedged_completion(
-                        _call_p1, _call_p2, p1_name, p2_name
+                        _call_p1, _call_p2, p1_name, p2_name, prompt_tokens=prompt_tokens
                     )
                     await self._circuit_breaker.record_success(winner_name)
                     if self._cache is not None:

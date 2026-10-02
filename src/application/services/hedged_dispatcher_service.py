@@ -49,10 +49,12 @@ class HedgedDispatcherService:
     def __init__(
         self,
         metrics: MetricsPort | None = None,
+        *,
         min_delay_seconds: float = 0.05,
         safety_margin_seconds: float = 0.05,
         default_p90_seconds: float = 0.35,
         window_size: int = 100,
+        max_hedging_prompt_tokens: int = 2000,
     ) -> None:
         """Initialize HedgedDispatcherService.
 
@@ -62,14 +64,21 @@ class HedgedDispatcherService:
             safety_margin_seconds: Safety delta added to P90 latency before triggering fallback.
             default_p90_seconds: Cold-start baseline P90 prior to collecting sufficient samples.
             window_size: Sliding window capacity of latency observations per provider.
+            max_hedging_prompt_tokens: Upper token limit beyond which hedging is disabled (FinOps).
         """
         self._metrics = metrics
         self._min_delay = min_delay_seconds
         self._safety_margin = safety_margin_seconds
         self._default_p90 = default_p90_seconds
         self._window_size = window_size
+        self._max_hedging_prompt_tokens = max_hedging_prompt_tokens
         self._trackers: dict[str, RollingQuantileTracker] = {}
         self._lock = asyncio.Lock()
+
+    @property
+    def max_hedging_prompt_tokens(self) -> int:
+        """Configured FinOps limit: prompt tokens above this threshold bypass hedging."""
+        return self._max_hedging_prompt_tokens
 
     async def _get_tracker(self, provider_name: str) -> RollingQuantileTracker:
         """Retrieve or initialize the sliding-window tracker for a provider."""
@@ -99,6 +108,7 @@ class HedgedDispatcherService:
         fallback_call: Callable[[], Awaitable[ChatCompletionResponse]] | None,
         primary_name: str,
         fallback_name: str | None = None,
+        prompt_tokens: int = 0,
     ) -> tuple[ChatCompletionResponse, str]:
         """Execute non-streaming completion with speculative hedging against P90 tail latency.
 
@@ -107,17 +117,32 @@ class HedgedDispatcherService:
             fallback_call: Optional async factory for the speculative fallback request.
             primary_name: Name identifier of the primary provider.
             fallback_name: Name identifier of the fallback provider.
+            prompt_tokens: Estimated or actual prompt tokens used for FinOps budget gating.
 
         Returns:
             Tuple of (winning_response, winning_provider_name).
         """
+        start_time = time.monotonic()
+
+        # FinOps budget guard: heavy context prompts bypass hedging to save costs
+        if prompt_tokens > self._max_hedging_prompt_tokens:
+            logger.info(
+                "FinOps guard: prompt (%d tokens) > max_hedging_prompt_tokens (%d); "
+                "bypassing speculative hedging for '%s'",
+                prompt_tokens,
+                self._max_hedging_prompt_tokens,
+                primary_name,
+            )
+            res = await primary_call()
+            elapsed = time.monotonic() - start_time
+            await self.record_latency(primary_name, elapsed)
+            return res, primary_name
 
         async def _invoke(
             call: Callable[[], Awaitable[ChatCompletionResponse]],
         ) -> ChatCompletionResponse:
             return await call()
 
-        start_time = time.monotonic()
         task_primary: asyncio.Task[ChatCompletionResponse] = asyncio.create_task(
             _invoke(primary_call)
         )
@@ -200,6 +225,7 @@ class HedgedDispatcherService:
         fallback_stream_factory: Callable[[], AsyncIterator[ChatCompletionChunk]] | None,
         primary_name: str,
         fallback_name: str | None = None,
+        prompt_tokens: int = 0,
     ) -> AsyncIterator[tuple[ChatCompletionChunk, str]]:
         """Stream chunks from winner of a speculative first-chunk race.
 
@@ -207,13 +233,32 @@ class HedgedDispatcherService:
         speculatively launches fallback stream. Whichever yields the first token wins; the
         loser is immediately cancelled (issuing HTTP/2 RST_STREAM).
 
+        Args:
+            primary_stream_factory: Factory creating the primary provider chunk stream.
+            fallback_stream_factory: Optional factory creating the speculative fallback stream.
+            primary_name: Identifier for primary provider.
+            fallback_name: Identifier for fallback provider.
+            prompt_tokens: Estimated or actual prompt tokens used for FinOps budget gating.
+
         Yields:
             Tuples of (chunk, provider_name).
         """
         start_time = time.monotonic()
         primary_stream = primary_stream_factory()
 
-        if fallback_stream_factory is None or fallback_name is None:
+        # FinOps budget guard: heavy context prompts bypass hedging
+        if (
+            fallback_stream_factory is None
+            or fallback_name is None
+            or prompt_tokens > self._max_hedging_prompt_tokens
+        ):
+            if prompt_tokens > self._max_hedging_prompt_tokens:
+                logger.info(
+                    "FinOps guard: stream prompt (%d tokens) > limit (%d); hedging off for '%s'",
+                    prompt_tokens,
+                    self._max_hedging_prompt_tokens,
+                    primary_name,
+                )
             first_chunk_emitted = False
             async for chunk in primary_stream:
                 if not first_chunk_emitted:

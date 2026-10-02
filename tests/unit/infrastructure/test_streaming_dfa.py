@@ -123,3 +123,21 @@ class TestStreamingDFAAutomaton:
         dfa.reset()
         assert dfa.carry_over == ""
         assert dfa.flush() == ""
+
+    def test_process_bytes_split_multibyte_utf8_cyrillic(self, dfa: StreamingDFAAutomaton) -> None:
+        """Verify raw bytes split across multibyte UTF-8 boundary decode and redact seamlessly."""
+        text = "Привет, вот ключ: sk-proj-1234567890abcdef1234"
+        raw_bytes = text.encode("utf-8")
+
+        # In UTF-8, 'р' is 2 bytes: 0xD1 0x80. Split right between those two bytes!
+        split_point = 3  # Inside Cyrillic 'р'
+        chunk1 = raw_bytes[:split_point]
+        chunk2 = raw_bytes[split_point:]
+
+        out1 = dfa.process_bytes(chunk1)
+        out2 = dfa.process_bytes(chunk2)
+        flushed = dfa.flush()
+
+        combined = out1 + out2 + flushed
+        assert combined == "Привет, вот ключ: [REDACTED]"
+        assert "sk-proj" not in combined

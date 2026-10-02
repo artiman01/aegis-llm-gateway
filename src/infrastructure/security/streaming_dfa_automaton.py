@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import logging
 import re
 from collections.abc import Sequence
@@ -70,6 +71,7 @@ class StreamingDFAAutomaton:
         self._replacement = replacement
         self._max_carry_over = max_carry_over
         self._carry_over = ""
+        self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="surrogatepass")
 
     @property
     def carry_over(self) -> str:
@@ -77,8 +79,23 @@ class StreamingDFAAutomaton:
         return self._carry_over
 
     def reset(self) -> None:
-        """Reset internal DFA state."""
+        """Reset internal DFA and UTF-8 incremental decoder state."""
         self._carry_over = ""
+        self._utf8_decoder.reset()
+
+    def process_bytes(self, chunk_bytes: bytes) -> str:
+        """Process incremental raw bytes, resolving split multibyte UTF-8 sequences.
+
+        Args:
+            chunk_bytes: Incremental raw bytes from network stream.
+
+        Returns:
+            Sanitized and redacted text.
+        """
+        if not chunk_bytes:
+            return ""
+        decoded = self._utf8_decoder.decode(chunk_bytes, final=False)
+        return self.process_chunk(decoded)
 
     def _redact_full_matches(self, text: str) -> str:
         """Apply all full sensitive regex patterns and replace occurrences."""
@@ -146,10 +163,14 @@ class StreamingDFAAutomaton:
         return redacted
 
     def flush(self) -> str:
-        """Flush remaining carry-over buffer at stream completion.
+        """Flush remaining carry-over buffer and decoder state at stream completion.
 
         Performs final redaction on buffered tail and returns remaining text.
         """
+        final_decoded = self._utf8_decoder.decode(b"", final=True)
+        if final_decoded:
+            self._carry_over += final_decoded
+
         if not self._carry_over:
             return ""
 

@@ -89,6 +89,9 @@ ignore = [
     "ARG002",  # Unused method argument (common in protocol/adapter implementations)
     "B008",    # Do not perform function call in argument defaults (FastAPI Depends idiom)
     "PLR0911", # Too many return statements (common in error handling dispatchers)
+    "RUF001",  # String contains ambiguous unicode (Cyrillic NLP support)
+    "RUF002",  # Docstring contains ambiguous unicode (Cyrillic NLP support)
+    "RUF003",  # Comment contains ambiguous unicode (Cyrillic NLP support)
 ]
 
 [tool.ruff.lint.isort]

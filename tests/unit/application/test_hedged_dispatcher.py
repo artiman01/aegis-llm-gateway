@@ -177,3 +177,43 @@ async def test_hedged_streaming_race_to_first_chunk(
     assert chunks[0].choices[0].delta.content == "Fast token 1"
     assert chunks[1].choices[0].delta.content == "Fast token 2"
     assert primary_stream_cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_hedged_dispatcher_finops_guard_bypasses_hedging() -> None:
+    """Prompt tokens exceeding max_hedging_prompt_tokens must route strictly to primary."""
+    dispatcher = HedgedDispatcherService(max_hedging_prompt_tokens=2000)
+    fallback_called = False
+
+    async def slow_primary() -> ChatCompletionResponse:
+        return ChatCompletionResponse(
+            id="chatcmpl-primary-only",
+            model="gpt-4o",
+            choices=[
+                Choice(index=0, message=ChoiceMessage(role=Role.ASSISTANT, content="Primary only"))
+            ],
+        )
+
+    async def fallback() -> ChatCompletionResponse:
+        nonlocal fallback_called
+        fallback_called = True
+        return ChatCompletionResponse(
+            id="chatcmpl-fb",
+            model="gpt-4o",
+            choices=[
+                Choice(index=0, message=ChoiceMessage(role=Role.ASSISTANT, content="Fallback"))
+            ],
+        )
+
+    # 2500 prompt tokens > 2000 limit: must strictly bypass hedging
+    resp, winner = await dispatcher.execute_hedged_completion(
+        primary_call=slow_primary,
+        fallback_call=fallback,
+        primary_name="openai",
+        fallback_name="anthropic",
+        prompt_tokens=2500,
+    )
+
+    assert resp.id == "chatcmpl-primary-only"
+    assert winner == "openai"
+    assert fallback_called is False

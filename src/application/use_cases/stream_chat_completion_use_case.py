@@ -134,8 +134,10 @@ class StreamChatCompletionUseCase:
                         async for c in res2:
                             yield c
 
+                    prompt_text = request.extract_prompt_text()
+                    prompt_tokens = max(1, len(prompt_text) // 4)
                     hedged_iter = self._hedged_dispatcher.execute_hedged_stream(
-                        _stream_p1, _stream_p2, p1_name, p2_name
+                        _stream_p1, _stream_p2, p1_name, p2_name, prompt_tokens=prompt_tokens
                     )
 
                     last_id = "chatcmpl-hedged"

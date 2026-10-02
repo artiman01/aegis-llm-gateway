@@ -102,8 +102,8 @@ class WhiteningTransformer(WhiteningPort):
         u, singular_values, _ = np.linalg.svd(covariance, full_matrices=True)
 
         # 4. Construct inverse square-root scaling matrix with strict division-by-zero protection
-        # Under severe rank deficiency, clamping singular values prevents zero/negative denominators
-        safe_singular = np.maximum(singular_values, 0.0) + self._epsilon
+        # singular_values already contain regularization from covariance matrix
+        safe_singular = np.maximum(singular_values, 1e-12)
         inv_sqrt_singular = 1.0 / np.sqrt(safe_singular)
         scaling_matrix = np.diag(inv_sqrt_singular)
 

@@ -104,6 +104,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     hedged_dispatcher = HedgedDispatcherService(
         metrics=metrics_adapter,
+        circuit_breaker=circuit_breaker,
         max_hedging_prompt_tokens=int(os.getenv("MAX_HEDGING_PROMPT_TOKENS", "2000")),
     )
     streaming_dfa = StreamingDFAAutomaton()

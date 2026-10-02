@@ -81,8 +81,8 @@ class RouteChatCompletionUseCase:
 
             if p1 is not None and p2 is not None and cfg1 is not None and cfg2 is not None:
                 try:
-                    await self._circuit_breaker.acquire_execution_permission(p1_name)
-                    await self._circuit_breaker.acquire_execution_permission(p2_name)
+                    lease1 = await self._circuit_breaker.acquire_lease(p1_name)
+                    lease2 = await self._circuit_breaker.acquire_lease(p2_name)
 
                     async def _call_p1() -> ChatCompletionResponse:
                         assert cfg1 is not None
@@ -98,10 +98,18 @@ class RouteChatCompletionUseCase:
 
                     prompt_text = request.extract_prompt_text()
                     prompt_tokens = max(1, len(prompt_text) // 4)
-                    response, winner_name = await self._hedged_dispatcher.execute_hedged_completion(
-                        _call_p1, _call_p2, p1_name, p2_name, prompt_tokens=prompt_tokens
+                    (
+                        response,
+                        _winner_name,
+                    ) = await self._hedged_dispatcher.execute_hedged_completion(
+                        _call_p1,
+                        _call_p2,
+                        p1_name,
+                        p2_name,
+                        prompt_tokens=prompt_tokens,
+                        primary_lease=lease1,
+                        fallback_lease=lease2,
                     )
-                    await self._circuit_breaker.record_success(winner_name)
                     if self._cache is not None:
                         await self._cache.set(request, response, bypass_cache=bypass_cache)
                     return response

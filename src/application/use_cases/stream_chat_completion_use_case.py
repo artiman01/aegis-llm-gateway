@@ -142,8 +142,8 @@ class StreamChatCompletionUseCase:
 
             if p1 is not None and p2 is not None and cfg1 is not None and cfg2 is not None:
                 try:
-                    await self._circuit_breaker.acquire_execution_permission(p1_name)
-                    await self._circuit_breaker.acquire_execution_permission(p2_name)
+                    primary_lease = await self._circuit_breaker.acquire_lease(p1_name)
+                    fallback_lease = await self._circuit_breaker.acquire_lease(p2_name)
 
                     async def _stream_p1() -> AsyncIterator[ChatCompletionChunk]:
                         assert cfg1 is not None
@@ -166,16 +166,18 @@ class StreamChatCompletionUseCase:
                     prompt_text = request.extract_prompt_text()
                     prompt_tokens = max(1, len(prompt_text) // 4)
                     hedged_iter = self._hedged_dispatcher.execute_hedged_stream(
-                        _stream_p1, _stream_p2, p1_name, p2_name, prompt_tokens=prompt_tokens
+                        _stream_p1,
+                        _stream_p2,
+                        p1_name,
+                        p2_name,
+                        prompt_tokens=prompt_tokens,
+                        primary_lease=primary_lease,
+                        fallback_lease=fallback_lease,
                     )
 
                     last_id = "chatcmpl-hedged"
-                    winner_recorded = False
                     async for chunk, winner_name in hedged_iter:
                         last_id = chunk.id
-                        if not winner_recorded:
-                            await self._circuit_breaker.record_success(winner_name)
-                            winner_recorded = True
                         if self._metrics is not None:
                             self._metrics.record_stream_chunk(
                                 provider=winner_name, model=request.model

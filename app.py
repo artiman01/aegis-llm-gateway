@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -123,7 +124,9 @@ async def send_chat_completion(
         "stream": stream,
     }
 
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {os.getenv('AEGIS_MASTER_KEY', 'sk-aegis-master-key')}",
+    }
     if bypass_cache:
         headers["Cache-Control"] = "no-cache"
 
